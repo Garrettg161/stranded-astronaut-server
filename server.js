@@ -52,7 +52,7 @@ const Player = mongoose.model('Player', PlayerSchema);
 // Basic endpoints
 
 // 1. Join/Create Game
-app.post('/api/join', async (req, res) => {
+app.post('/join', async (req, res) => {
   try {
     const { sessionId, playerName, role } = req.body;
     
@@ -124,7 +124,7 @@ app.post('/api/join', async (req, res) => {
 });
 
 // 2. Leave Game
-app.post('/api/leave', async (req, res) => {
+app.post('/leave', async (req, res) => {
   try {
     const { sessionId, playerId } = req.body;
     
@@ -159,7 +159,7 @@ app.post('/api/leave', async (req, res) => {
 });
 
 // 3. Sync Game State
-app.post('/api/sync', async (req, res) => {
+app.post('/sync', async (req, res) => {
   try {
     const { sessionId, playerId } = req.body;
     
@@ -180,6 +180,13 @@ app.post('/api/sync', async (req, res) => {
     // Get all active players in this session
     const allPlayers = await Player.find({ sessionId, isActive: true });
     
+    // Get players in same location as current player
+    const playersInLocation = await Player.find({
+      sessionId,
+      isActive: true,
+      currentLocation: player.currentLocation
+    });
+    
     // Format response
     const syncData = {
       player: {
@@ -196,6 +203,11 @@ app.post('/api/sync', async (req, res) => {
         isHuman: p.isHuman,
         currentLocation: p.currentLocation
       })),
+      playersInLocation: playersInLocation.map(p => ({
+        id: p.id,
+        name: p.name,
+        role: p.role
+      })),
       gameFacts: session.gameFacts
     };
     
@@ -207,6 +219,64 @@ app.post('/api/sync', async (req, res) => {
   } catch (error) {
     console.error('Error syncing game state:', error);
     res.status(500).json({ error: 'Failed to sync game state' });
+  }
+});
+
+// 4. Process Game Action
+app.post('/action', async (req, res) => {
+  try {
+    const { sessionId, playerId, action } = req.body;
+    
+    // Check API key
+    const providedApiKey = req.headers.authorization?.split(' ')[1];
+    if (providedApiKey !== process.env.API_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    // Get player and session
+    const player = await Player.findOne({ id: playerId, sessionId });
+    const session = await GameSession.findOne({ id: sessionId });
+    
+    if (!player || !session) {
+      return res.status(404).json({ error: 'Player or session not found' });
+    }
+    
+    // Handle common actions (very basic implementation)
+    let actionResult = "";
+    
+    // Simple action handler
+    if (action.toLowerCase() === "exit" && player.currentLocation === "0,1,2,1,2") {
+      // Handle exit from CryoPod specifically
+      player.currentLocation = "0,1,0,0,1"; // CryoPod Chamber
+      await player.save();
+      
+      actionResult = `ACTION:\nLOCATION_NAME: CryoPod Chamber\nCOORDINATES: 0,1,0,0,1\nDESCRIPTION: You exit the CryoPod into a large chamber with several other pods. The lights flicker overhead, and there's a faint smell of ozone in the air. Control panels line the walls, many of them damaged.\nITEMS: None\nEXITS: North (to Corridor), East (to Medical Bay)\nTIME_ELAPSED: 0 hours, 10 minutes`;
+    } else if (action.toLowerCase().startsWith("look")) {
+      // Basic look command
+      actionResult = `ACTION:\nLOCATION_NAME: ${player.currentLocation.includes("0,1,2,1,2") ? "CryoPod" : "Current Location"}\nCOORDINATES: ${player.currentLocation}\nDESCRIPTION: You look around your current location. (This is a placeholder response as the multiplayer server is still in development.)\nITEMS: None\nEXITS: Various directions\nTIME_ELAPSED: 0 hours, 10 minutes`;
+    } else {
+      // Generic response for other actions
+      actionResult = `ACTION:\nYou attempted to ${action}. This is a placeholder response as the multiplayer API is still in development.`;
+    }
+    
+    // Update player's last activity
+    player.lastActivity = new Date();
+    await player.save();
+    
+    // Notify others in the same location
+    io.to(sessionId).emit('playerAction', {
+      playerId: player.id,
+      playerName: player.name,
+      action: action,
+      location: player.currentLocation
+    });
+    
+    // Send back a response
+    res.json({ result: actionResult });
+    
+  } catch (error) {
+    console.error('Error processing action:', error);
+    res.status(500).json({ error: 'Failed to process action' });
   }
 });
 
