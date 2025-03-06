@@ -7,7 +7,7 @@ const socketIo = require('socket.io');
 require('dotenv').config();
 
 // Server version for tracking
-const SERVER_VERSION = "1.1.0";
+const SERVER_VERSION = "1.2.0";
 
 // Generate a short, human-friendly session ID
 function generateShortId() {
@@ -88,32 +88,49 @@ const Message = mongoose.model('Message', MessageSchema);
 // 1. Join/Create Game
 app.post('/join', async (req, res) => {
   try {
+    console.log("Join request received with body:", req.body);
     const { sessionId, playerName, role } = req.body;
     
     // Check API key
     const providedApiKey = req.headers.authorization?.split(' ')[1];
     if (providedApiKey !== process.env.API_KEY) {
+      console.log("Unauthorized access attempt with key:", providedApiKey);
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
     // If sessionId provided, join existing game; otherwise, create new
     let session;
     if (sessionId) {
-      // Try to find by short ID first
-      session = await GameSession.findOne({ shortId: sessionId });
+      console.log(`Attempting to find session with ID or shortId: ${sessionId}`);
       
-      // If not found, try by regular ID
-      if (!session) {
-        session = await GameSession.findOne({ id: sessionId });
+      // Try to find by short ID first (case-insensitive)
+      session = await GameSession.findOne({ 
+        shortId: { $regex: new RegExp(`^${sessionId}$`, "i") } 
+      });
+      
+      if (session) {
+        console.log(`Found session by shortId: ${sessionId}`);
+      } else {
+        // If not found, try by regular ID (case-insensitive)
+        session = await GameSession.findOne({ 
+          id: { $regex: new RegExp(`^${sessionId}$`, "i") } 
+        });
+        
+        if (session) {
+          console.log(`Found session by regular id: ${sessionId}`);
+        }
       }
       
       if (!session) {
+        console.log(`No session found for ID: ${sessionId}`);
         return res.status(404).json({ error: 'Game session not found' });
       }
     } else {
       // Create new session with default game facts and a short ID
       const newSessionId = uuidv4();
       const shortId = generateShortId();
+      console.log(`Creating new session with ID: ${newSessionId}, shortId: ${shortId}`);
+      
       session = new GameSession({
         id: newSessionId,
         shortId: shortId,
@@ -142,6 +159,7 @@ app.post('/join', async (req, res) => {
     });
     
     await player.save();
+    console.log(`Created player: ${player.id} with name: ${playerName} in session: ${session.id}`);
     
     // Create a system message about player joining
     const joinMessage = new Message({
@@ -155,14 +173,8 @@ app.post('/join', async (req, res) => {
     
     await joinMessage.save();
     
-    // Notify other players via Socket.io
-    io.to(session.id).emit('playerJoined', {
-      id: player.id,
-      name: player.name,
-      role: player.role
-    });
-    
-    res.json({
+    // Prepare response
+    const responseObject = {
       player: {
         id: player.id,
         name: player.name,
@@ -171,8 +183,19 @@ app.post('/join', async (req, res) => {
         inventory: Object.fromEntries(player.inventory)
       },
       sessionId: session.id,
-      shortId: session.shortId // Include the short ID in the response
+      shortId: session.shortId
+    };
+    
+    console.log("Sending response:", JSON.stringify(responseObject));
+    
+    // Notify other players via Socket.io
+    io.to(session.id).emit('playerJoined', {
+      id: player.id,
+      name: player.name,
+      role: player.role
     });
+    
+    res.json(responseObject);
   } catch (error) {
     console.error('Error joining game:', error);
     res.status(500).json({ error: 'Failed to join game' });
