@@ -7,7 +7,25 @@ const socketIo = require('socket.io');
 require('dotenv').config();
 
 // Server version for tracking
-const SERVER_VERSION = "1.0.0";
+const SERVER_VERSION = "1.1.0";
+
+// Generate a short, human-friendly session ID
+function generateShortId() {
+    // Define character sets for different parts of the ID
+    const alphaPart = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // No I or O to avoid confusion
+    const numericPart = '23456789'; // No 0 or 1 to avoid confusion
+    
+    // Create a random 6-character code: 3 letters + 3 numbers
+    let id = '';
+    for (let i = 0; i < 3; i++) {
+        id += alphaPart.charAt(Math.floor(Math.random() * alphaPart.length));
+    }
+    for (let i = 0; i < 3; i++) {
+        id += numericPart.charAt(Math.floor(Math.random() * numericPart.length));
+    }
+    
+    return id;
+}
 
 // Initialize Express app
 const app = express();
@@ -31,6 +49,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/game_db')
 // Define schemas
 const GameSessionSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
+  shortId: { type: String, unique: true }, // Added for human-friendly IDs
   startTime: { type: Date, default: Date.now },
   lastUpdateTime: { type: Date, default: Date.now },
   gameFacts: { type: Object, default: {} }
@@ -80,15 +99,24 @@ app.post('/join', async (req, res) => {
     // If sessionId provided, join existing game; otherwise, create new
     let session;
     if (sessionId) {
-      session = await GameSession.findOne({ id: sessionId });
+      // Try to find by short ID first
+      session = await GameSession.findOne({ shortId: sessionId });
+      
+      // If not found, try by regular ID
+      if (!session) {
+        session = await GameSession.findOne({ id: sessionId });
+      }
+      
       if (!session) {
         return res.status(404).json({ error: 'Game session not found' });
       }
     } else {
-      // Create new session with default game facts
+      // Create new session with default game facts and a short ID
       const newSessionId = uuidv4();
+      const shortId = generateShortId();
       session = new GameSession({
         id: newSessionId,
+        shortId: shortId,
         gameFacts: {
           planetName: "Zeta Proxima b",
           atmosphere: "Thin, breathable with assistance",
@@ -142,7 +170,8 @@ app.post('/join', async (req, res) => {
         currentLocation: player.currentLocation,
         inventory: Object.fromEntries(player.inventory)
       },
-      sessionId: session.id
+      sessionId: session.id,
+      shortId: session.shortId // Include the short ID in the response
     });
   } catch (error) {
     console.error('Error joining game:', error);
