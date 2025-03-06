@@ -45,9 +45,21 @@ const PlayerSchema = new mongoose.Schema({
   lastActivity: { type: Date, default: Date.now }
 });
 
+const MessageSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  sessionId: { type: String, required: true, index: true },
+  senderId: { type: String, required: true },
+  senderName: { type: String, required: true },
+  targetId: { type: String },
+  content: { type: String, required: true },
+  timestamp: { type: Date, default: Date.now },
+  isSystemMessage: { type: Boolean, default: false }
+});
+
 // Create models
 const GameSession = mongoose.model('GameSession', GameSessionSchema);
 const Player = mongoose.model('Player', PlayerSchema);
+const Message = mongoose.model('Message', MessageSchema);
 
 // Basic endpoints
 
@@ -100,6 +112,18 @@ app.post('/join', async (req, res) => {
     
     await player.save();
     
+    // Create a system message about player joining
+    const joinMessage = new Message({
+      id: uuidv4(),
+      sessionId: session.id,
+      senderId: 'system',
+      senderName: 'System',
+      content: `${playerName} has joined the game.`,
+      isSystemMessage: true
+    });
+    
+    await joinMessage.save();
+    
     // Notify other players via Socket.io
     io.to(session.id).emit('playerJoined', {
       id: player.id,
@@ -145,6 +169,18 @@ app.post('/leave', async (req, res) => {
     player.lastActivity = new Date();
     await player.save();
     
+    // Create system message about player leaving
+    const leaveMessage = new Message({
+      id: uuidv4(),
+      sessionId: sessionId,
+      senderId: 'system',
+      senderName: 'System',
+      content: `${player.name} has left the game.`,
+      isSystemMessage: true
+    });
+    
+    await leaveMessage.save();
+    
     // Notify other players
     io.to(sessionId).emit('playerLeft', { 
       id: playerId, 
@@ -158,10 +194,10 @@ app.post('/leave', async (req, res) => {
   }
 });
 
-// 3. Sync Game State
+// 3. Sync Game State - Now just providing data, not processing logic
 app.post('/sync', async (req, res) => {
   try {
-    const { sessionId, playerId } = req.body;
+    const { sessionId, playerId, currentLocation, inventory } = req.body;
     
     // Check API key
     const providedApiKey = req.headers.authorization?.split(' ')[1];
@@ -177,6 +213,19 @@ app.post('/sync', async (req, res) => {
       return res.status(404).json({ error: 'Session or player not found' });
     }
     
+    // Update player state if provided
+    if (currentLocation) {
+      player.currentLocation = currentLocation;
+    }
+    
+    if (inventory) {
+      // Convert inventory object to Map for storage
+      player.inventory = new Map(Object.entries(inventory));
+    }
+    
+    player.lastActivity = new Date();
+    await player.save();
+    
     // Get all active players in this session
     const allPlayers = await Player.find({ sessionId, isActive: true });
     
@@ -186,6 +235,11 @@ app.post('/sync', async (req, res) => {
       isActive: true,
       currentLocation: player.currentLocation
     });
+    
+    // Get recent messages for this session
+    const messages = await Message.find({ sessionId })
+      .sort({ timestamp: -1 })
+      .limit(50);
     
     // Format response
     const syncData = {
@@ -208,12 +262,17 @@ app.post('/sync', async (req, res) => {
         name: p.name,
         role: p.role
       })),
+      messages: messages.map(m => ({
+        id: m.id,
+        senderId: m.senderId,
+        senderName: m.senderName,
+        targetId: m.targetId,
+        content: m.content,
+        timestamp: m.timestamp.getTime(),
+        isSystemMessage: m.isSystemMessage
+      })),
       gameFacts: session.gameFacts
     };
-    
-    // Update last activity
-    player.lastActivity = new Date();
-    await player.save();
     
     res.json(syncData);
   } catch (error) {
@@ -222,10 +281,10 @@ app.post('/sync', async (req, res) => {
   }
 });
 
-// 4. Process Game Action
+// 4. Process Game Action - Simplified to just broadcast events
 app.post('/action', async (req, res) => {
   try {
-    const { sessionId, playerId, action } = req.body;
+    const { sessionId, playerId, action, result } = req.body;
     
     // Check API key
     const providedApiKey = req.headers.authorization?.split(' ')[1];
@@ -233,37 +292,17 @@ app.post('/action', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    // Get player and session
+    // Get player
     const player = await Player.findOne({ id: playerId, sessionId });
-    const session = await GameSession.findOne({ id: sessionId });
-    
-    if (!player || !session) {
-      return res.status(404).json({ error: 'Player or session not found' });
-    }
-    
-    // Handle common actions (very basic implementation)
-    let actionResult = "";
-    
-    // Simple action handler
-    if (action.toLowerCase() === "exit" && player.currentLocation === "0,1,2,1,2") {
-      // Handle exit from CryoPod specifically
-      player.currentLocation = "0,1,0,0,1"; // CryoPod Chamber
-      await player.save();
-      
-      actionResult = `ACTION:\nLOCATION_NAME: CryoPod Chamber\nCOORDINATES: 0,1,0,0,1\nDESCRIPTION: You exit the CryoPod into a large chamber with several other pods. The lights flicker overhead, and there's a faint smell of ozone in the air. Control panels line the walls, many of them damaged.\nITEMS: None\nEXITS: North (to Corridor), East (to Medical Bay)\nTIME_ELAPSED: 0 hours, 10 minutes`;
-    } else if (action.toLowerCase().startsWith("look")) {
-      // Basic look command
-      actionResult = `ACTION:\nLOCATION_NAME: ${player.currentLocation.includes("0,1,2,1,2") ? "CryoPod" : "Current Location"}\nCOORDINATES: ${player.currentLocation}\nDESCRIPTION: You look around your current location. (This is a placeholder response as the multiplayer server is still in development.)\nITEMS: None\nEXITS: Various directions\nTIME_ELAPSED: 0 hours, 10 minutes`;
-    } else {
-      // Generic response for other actions
-      actionResult = `ACTION:\nYou attempted to ${action}. This is a placeholder response as the multiplayer API is still in development.`;
+    if (!player) {
+      return res.status(404).json({ error: 'Player not found' });
     }
     
     // Update player's last activity
     player.lastActivity = new Date();
     await player.save();
     
-    // Notify others in the same location
+    // Notify others in the same location about the action
     io.to(sessionId).emit('playerAction', {
       playerId: player.id,
       playerName: player.name,
@@ -271,12 +310,175 @@ app.post('/action', async (req, res) => {
       location: player.currentLocation
     });
     
-    // Send back a response
-    res.json({ result: actionResult });
+    // Just return success - client handles the actual response
+    res.json({ 
+      success: true,
+      result: result || "Action received by server"
+    });
     
   } catch (error) {
     console.error('Error processing action:', error);
     res.status(500).json({ error: 'Failed to process action' });
+  }
+});
+
+// 5. Send Message between players
+app.post('/message', async (req, res) => {
+  try {
+    const { sessionId, senderId, content, targetId } = req.body;
+    
+    // Check API key
+    const providedApiKey = req.headers.authorization?.split(' ')[1];
+    if (providedApiKey !== process.env.API_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    // Get sender
+    const sender = await Player.findOne({ id: senderId, sessionId });
+    if (!sender) {
+      return res.status(404).json({ error: 'Sender not found' });
+    }
+    
+    // Create message
+    const message = new Message({
+      id: uuidv4(),
+      sessionId,
+      senderId,
+      senderName: sender.name,
+      targetId,
+      content,
+      timestamp: new Date(),
+      isSystemMessage: false
+    });
+    
+    await message.save();
+    
+    // Update sender's last activity
+    sender.lastActivity = new Date();
+    await sender.save();
+    
+    // Notify players in session
+    io.to(sessionId).emit('newMessage', {
+      id: message.id,
+      senderId: message.senderId,
+      senderName: message.senderName,
+      targetId: message.targetId,
+      content: message.content,
+      timestamp: message.timestamp.getTime(),
+      isSystemMessage: message.isSystemMessage
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error sending message:', error);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// 6. Transfer item between players
+app.post('/transferItem', async (req, res) => {
+  try {
+    const { sessionId, fromPlayerId, toPlayerId, item, quantity } = req.body;
+    
+    // Check API key
+    const providedApiKey = req.headers.authorization?.split(' ')[1];
+    if (providedApiKey !== process.env.API_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    // Get players
+    const fromPlayer = await Player.findOne({ id: fromPlayerId, sessionId });
+    const toPlayer = await Player.findOne({ id: toPlayerId, sessionId });
+    
+    if (!fromPlayer || !toPlayer) {
+      return res.status(404).json({ error: 'One or both players not found' });
+    }
+    
+    // Check if in same location
+    if (fromPlayer.currentLocation !== toPlayer.currentLocation) {
+      return res.status(400).json({ error: 'Players must be in the same location to transfer items' });
+    }
+    
+    // Check if sender has enough of the item
+    const senderQuantity = fromPlayer.inventory.get(item) || 0;
+    if (senderQuantity < quantity) {
+      return res.status(400).json({ error: 'Not enough items to transfer' });
+    }
+    
+    // Update inventories
+    fromPlayer.inventory.set(item, senderQuantity - quantity);
+    toPlayer.inventory.set(item, (toPlayer.inventory.get(item) || 0) + quantity);
+    
+    // Save changes
+    await fromPlayer.save();
+    await toPlayer.save();
+    
+    // Create system message about transfer
+    const transferMessage = new Message({
+      id: uuidv4(),
+      sessionId,
+      senderId: 'system',
+      senderName: 'System',
+      content: `${fromPlayer.name} gave ${quantity} ${item} to ${toPlayer.name}.`,
+      isSystemMessage: true
+    });
+    
+    await transferMessage.save();
+    
+    // Notify players
+    io.to(sessionId).emit('itemTransferred', {
+      fromPlayerId,
+      fromPlayerName: fromPlayer.name,
+      toPlayerId,
+      toPlayerName: toPlayer.name,
+      item,
+      quantity
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error transferring item:', error);
+    res.status(500).json({ error: 'Failed to transfer item' });
+  }
+});
+
+// 7. Update player location
+app.post('/updateLocation', async (req, res) => {
+  try {
+    const { sessionId, playerId, location } = req.body;
+    
+    // Check API key
+    const providedApiKey = req.headers.authorization?.split(' ')[1];
+    if (providedApiKey !== process.env.API_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    // Get player
+    const player = await Player.findOne({ id: playerId, sessionId });
+    if (!player) {
+      return res.status(404).json({ error: 'Player not found' });
+    }
+    
+    // Remember old location
+    const oldLocation = player.currentLocation;
+    
+    // Update location
+    player.currentLocation = location;
+    player.lastActivity = new Date();
+    await player.save();
+    
+    // Notify players about movement
+    io.to(sessionId).emit('playerMoved', {
+      playerId: player.id,
+      playerName: player.name,
+      fromLocation: oldLocation,
+      toLocation: location
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating location:', error);
+    res.status(500).json({ error: 'Failed to update location' });
   }
 });
 
