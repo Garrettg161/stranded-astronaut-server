@@ -6,6 +6,9 @@ const mongoose = require('mongoose');
 const socketIo = require('socket.io');
 require('dotenv').config();
 
+// Server version for tracking
+const SERVER_VERSION = "1.0.0";
+
 // Initialize Express app
 const app = express();
 const server = http.createServer(app);
@@ -503,5 +506,5 @@ io.on('connection', (socket) => {
 // Start the server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Stranded Astronaut Server v${SERVER_VERSION} running on port ${PORT}`);
 });
