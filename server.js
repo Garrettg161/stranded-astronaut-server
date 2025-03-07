@@ -34,59 +34,86 @@ const players = {};
 
 // Routes
 app.get('/', (req, res) => {
-    res.send('Stranded Astronaut Multiplayer Server');
+    res.send('Stranded Astronaut Multiplayer Server v2.0');
 });
 
 // Create or join a session
 app.post('/join', validateApiKey, (req, res) => {
-    const { sessionId, playerName, sessionName, role } = req.body;
+    console.log('Join request received with body:', req.body);
+    
+    const { sessionId, playerName, sessionName } = req.body;
     
     // Generate a player ID
     const playerId = uuidv4();
     
     // If sessionId is provided, try to join an existing session
     if (sessionId) {
-        console.log(`Attempting to join session with ID: ${sessionId}`);
+        console.log(`Attempting to join with provided ID: ${sessionId}`);
         
-        // First check if this is a full session ID
+        // First, try exact match
         if (gameSessions[sessionId]) {
-            console.log(`Found session with full ID: ${sessionId}`);
-            return joinExistingSession(sessionId, playerId, playerName, role, res);
+            console.log(`Found session with exact ID match: ${sessionId}`);
+            return joinExistingSession(sessionId, playerId, playerName, res);
         }
         
-        // Next check if this is a short code
-        const matchingSession = findSessionByShortCode(sessionId);
-        if (matchingSession) {
-            console.log(`Found session with short code: ${sessionId}`);
-            return joinExistingSession(matchingSession, playerId, playerName, role, res);
+        // Next, try as a short code (case-insensitive)
+        const shortCodeToCheck = sessionId.toLowerCase();
+        console.log(`Checking short code: ${shortCodeToCheck}`);
+        
+        // List all available sessions for debugging
+        console.log('Available sessions:');
+        Object.keys(gameSessions).forEach(id => {
+            const shortCode = id.substring(0, 6).toLowerCase();
+            console.log(`- ID: ${id}, Short Code: ${shortCode}`);
+        });
+        
+        for (const id in gameSessions) {
+            const shortCode = id.substring(0, 6).toLowerCase();
+            if (shortCode === shortCodeToCheck) {
+                console.log(`Found session with short code: ${shortCodeToCheck}`);
+                return joinExistingSession(id, playerId, playerName, res);
+            }
         }
         
-        // Finally check if this is a session name
-        const sessionByName = findSessionByName(sessionId);
-        if (sessionByName) {
-            console.log(`Found session with name: ${sessionId}`);
-            return joinExistingSession(sessionByName, playerId, playerName, role, res);
+        // Try as a session name
+        if (sessionId.length > 6) { // Only try for longer strings that might be names
+            console.log(`Checking as name: ${sessionId}`);
+            for (const id in gameSessions) {
+                const session = gameSessions[id];
+                const sessionNameLower = (session.sessionName || '').toLowerCase();
+                const searchNameLower = sessionId.toLowerCase();
+                
+                console.log(`Comparing "${sessionNameLower}" with "${searchNameLower}"`);
+                
+                if (sessionNameLower === searchNameLower) {
+                    console.log(`Found session with name: ${sessionId}`);
+                    return joinExistingSession(id, playerId, playerName, res);
+                }
+            }
         }
         
         // If we got here, no matching session was found
+        console.log(`No matching session found for: ${sessionId}`);
         return res.status(404).json({ error: 'Game session not found' });
     }
     
     // Create a new session
     const newSessionId = uuidv4();
-    console.log(`Creating new session with ID: ${newSessionId}`);
+    console.log(`Creating new session with ID: ${newSessionId}, shortId: ${newSessionId.substring(0, 6).toUpperCase()}`);
     
-    // Initialize the game session
+    // Initialize the game session with the provided session name or a default
+    const actualSessionName = sessionName || `Game-${newSessionId.substring(0, 6)}`;
+    
     gameSessions[newSessionId] = {
         id: newSessionId,
         createdAt: new Date(),
         players: {},
         gameFacts: getDefaultGameFacts(),
-        sessionName: sessionName || `Game-${newSessionId.substring(0, 6)}`
+        sessionName: actualSessionName
     };
     
     // Add the player to the session
-    const player = createPlayer(playerId, playerName, role);
+    const player = createPlayer(playerId, playerName);
     gameSessions[newSessionId].players[playerId] = player;
     players[playerId] = {
         id: playerId,
@@ -96,20 +123,20 @@ app.post('/join', validateApiKey, (req, res) => {
     // Return the session info
     res.json({
         sessionId: newSessionId,
-        sessionName: gameSessions[newSessionId].sessionName,
+        sessionName: actualSessionName,
         shortCode: newSessionId.substring(0, 6).toUpperCase(),
         player: player
     });
 });
 
 // Helper function to join an existing session
-function joinExistingSession(sessionId, playerId, playerName, role, res) {
+function joinExistingSession(sessionId, playerId, playerName, res) {
     if (!gameSessions[sessionId]) {
         return res.status(404).json({ error: 'Game session not found' });
     }
     
     // Create the player
-    const player = createPlayer(playerId, playerName, role);
+    const player = createPlayer(playerId, playerName);
     
     // Add player to session
     gameSessions[sessionId].players[playerId] = player;
@@ -128,44 +155,17 @@ function joinExistingSession(sessionId, playerId, playerName, role, res) {
 }
 
 // Helper to create a player object
-function createPlayer(id, name, role) {
+function createPlayer(id, name) {
     return {
         id: id,
         name: name || 'Player',
-        role: role || 'Astronaut',
+        role: 'Astronaut',
         isHuman: true,
         isActive: true,
         currentLocation: '0,1,2,1,2', // Start in CryoPod
         inventory: {},
         lastActivity: new Date()
     };
-}
-
-// Find a session by its short code (first 6 characters of UUID)
-function findSessionByShortCode(shortCode) {
-    shortCode = shortCode.toLowerCase();
-    
-    for (const sessionId in gameSessions) {
-        if (sessionId.substring(0, 6).toLowerCase() === shortCode) {
-            return sessionId;
-        }
-    }
-    
-    return null;
-}
-
-// Find a session by its name
-function findSessionByName(name) {
-    name = name.toLowerCase();
-    
-    for (const sessionId in gameSessions) {
-        const session = gameSessions[sessionId];
-        if (session.sessionName && session.sessionName.toLowerCase() === name) {
-            return sessionId;
-        }
-    }
-    
-    return null;
 }
 
 // Leave a session
@@ -189,54 +189,27 @@ app.post('/leave', validateApiKey, (req, res) => {
     res.json({ success: true });
 });
 
-// Lookup a session by name or code
+// Lookup a session (debugging endpoint)
 app.post('/lookup', validateApiKey, (req, res) => {
+    console.log('Lookup request received with body:', req.body);
+    
+    // List all sessions for debugging
+    console.log('All available sessions:');
+    Object.entries(gameSessions).forEach(([id, session]) => {
+        console.log(`- ID: ${id}, Name: ${session.sessionName}, Short code: ${id.substring(0, 6).toUpperCase()}`);
+    });
+    
     const { sessionId, sessionName } = req.body;
     
-    if (sessionId) {
-        // Look up by ID or short code
-        if (gameSessions[sessionId]) {
-            return res.json({ 
-                sessionId: sessionId,
-                sessionName: gameSessions[sessionId].sessionName
-            });
-        }
-        
-        // Try short code
-        const matchingSession = findSessionByShortCode(sessionId);
-        if (matchingSession) {
-            return res.json({ 
-                sessionId: matchingSession,
-                sessionName: gameSessions[matchingSession].sessionName
-            });
-        }
-    }
-    
-    if (sessionName) {
-        // Look up by name
-        const sessionId = findSessionByName(sessionName);
-        if (sessionId) {
-            return res.json({ 
-                sessionId: sessionId,
-                sessionName: gameSessions[sessionId].sessionName
-            });
-        }
-    }
-    
-    res.status(404).json({ error: 'Session not found' });
-});
-
-// List active sessions
-app.post('/sessions', validateApiKey, (req, res) => {
-    const activeSessionsInfo = Object.entries(gameSessions).map(([id, session]) => ({
-        id: id,
-        shortCode: id.substring(0, 6).toUpperCase(),
-        name: session.sessionName,
-        playerCount: Object.keys(session.players).length,
-        createdAt: session.createdAt
-    }));
-    
-    res.json(activeSessionsInfo);
+    // Respond with matching session info or not found
+    res.json({
+        sessions: Object.entries(gameSessions).map(([id, session]) => ({
+            id: id,
+            name: session.sessionName,
+            shortCode: id.substring(0, 6).toUpperCase(),
+            playerCount: Object.keys(session.players).length
+        }))
+    });
 });
 
 // Send a message
@@ -292,28 +265,20 @@ app.post('/action', validateApiKey, (req, res) => {
     // Update player's last activity time
     gameSessions[sessionId].players[playerId].lastActivity = new Date();
     
-    // Add action to session history if needed
-    // This is a simplified version - in a real implementation, you'd process the action
-    
     res.json({ result: `Action "${action}" received` });
 });
 
 // Update player location
 app.post('/updateLocation', validateApiKey, (req, res) => {
-    const { sessionId, playerId, locationId, forceUpdate } = req.body;
+    const { sessionId, playerId, locationId } = req.body;
     
     if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
         return res.status(404).json({ error: 'Session or player not found' });
     }
     
     const player = gameSessions[sessionId].players[playerId];
-    
-    // Only update if location has changed or force update is specified
-    if (forceUpdate || player.currentLocation !== locationId) {
-        console.log(`Updating player ${playerId} location to ${locationId}`);
-        player.currentLocation = locationId;
-        player.lastActivity = new Date();
-    }
+    player.currentLocation = locationId;
+    player.lastActivity = new Date();
     
     res.json({ success: true });
 });
@@ -372,25 +337,11 @@ app.post('/sync', validateApiKey, (req, res) => {
     // Filter players by activity (last 5 minutes)
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
     const activePlayers = {};
-    let inactivePlayers = 0;
     
     for (const pid in gameSessions[sessionId].players) {
         const player = gameSessions[sessionId].players[pid];
         if (new Date(player.lastActivity) > fiveMinutesAgo) {
             activePlayers[pid] = player;
-        } else {
-            inactivePlayers++;
-        }
-    }
-    
-    // For large sessions, periodically clean up inactive players
-    if (inactivePlayers > 10) {
-        for (const pid in gameSessions[sessionId].players) {
-            const player = gameSessions[sessionId].players[pid];
-            if (new Date(player.lastActivity) <= fiveMinutesAgo) {
-                delete gameSessions[sessionId].players[pid];
-                delete players[pid];
-            }
         }
     }
     
@@ -404,6 +355,7 @@ app.post('/sync', validateApiKey, (req, res) => {
     const responseData = {
         sessionId: sessionId,
         sessionName: gameSessions[sessionId].sessionName,
+        shortCode: sessionId.substring(0, 6).toUpperCase(),
         player: gameSessions[sessionId].players[playerId],
         allPlayers: Object.values(activePlayers),
         playersInLocation: playersInLocation,
@@ -430,33 +382,7 @@ function getDefaultGameFacts() {
     };
 }
 
-// Session maintenance - periodically clean up empty sessions
-setInterval(() => {
-    const now = new Date();
-    for (const sessionId in gameSessions) {
-        const session = gameSessions[sessionId];
-        // Remove sessions that are empty or inactive for more than 24 hours
-        const sessionAge = now - new Date(session.createdAt);
-        const isOld = sessionAge > 24 * 60 * 60 * 1000; // 24 hours
-        const isEmpty = Object.keys(session.players).length === 0;
-        
-        if (isEmpty || isOld) {
-            console.log(`Cleaning up session ${sessionId}: isEmpty=${isEmpty}, isOld=${isOld}`);
-            delete gameSessions[sessionId];
-            
-            // Clean up any players still associated with this session
-            if (!isEmpty) {
-                for (const playerId in players) {
-                    if (players[playerId].sessionId === sessionId) {
-                        delete players[playerId];
-                    }
-                }
-            }
-        }
-    }
-}, 60 * 60 * 1000); // Run every hour
-
 // Start the server
 app.listen(port, () => {
-    console.log(`Stranded Astronaut server running on port ${port}`);
+    console.log(`Stranded Astronaut Multiplayer Server v2.0 running on port ${port}`);
 });
