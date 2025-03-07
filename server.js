@@ -1,562 +1,462 @@
 const express = require('express');
-const http = require('http');
-const cors = require('cors');
+const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
-const mongoose = require('mongoose');
-const socketIo = require('socket.io');
-require('dotenv').config();
+const cors = require('cors');
+const app = express();
+const port = process.env.PORT || 3000;
 
-// Server version for tracking
-const SERVER_VERSION = "1.2.0";
+// Middleware
+app.use(cors());
+app.use(bodyParser.json());
 
-// Generate a short, human-friendly session ID
-function generateShortId() {
-    // Define character sets for different parts of the ID
-    const alphaPart = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // No I or O to avoid confusion
-    const numericPart = '23456789'; // No 0 or 1 to avoid confusion
+// API Key validation middleware
+const validateApiKey = (req, res, next) => {
+    const authHeader = req.headers.authorization;
     
-    // Create a random 6-character code: 3 letters + 3 numbers
-    let id = '';
-    for (let i = 0; i < 3; i++) {
-        id += alphaPart.charAt(Math.floor(Math.random() * alphaPart.length));
-    }
-    for (let i = 0; i < 3; i++) {
-        id += numericPart.charAt(Math.floor(Math.random() * numericPart.length));
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Unauthorized - Missing or invalid API key' });
     }
     
-    return id;
+    const apiKey = authHeader.split(' ')[1];
+    // Simple API key for demo purposes - in production use a secure method
+    if (apiKey !== 'b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA') {
+        return res.status(401).json({ error: 'Unauthorized - Invalid API key' });
+    }
+    
+    next();
+};
+
+// In-memory storage for game sessions
+const gameSessions = {};
+
+// In-memory storage for players
+const players = {};
+
+// Routes
+app.get('/', (req, res) => {
+    res.send('Stranded Astronaut Multiplayer Server');
+});
+
+// Create or join a session
+app.post('/join', validateApiKey, (req, res) => {
+    const { sessionId, playerName, sessionName, role } = req.body;
+    
+    // Generate a player ID
+    const playerId = uuidv4();
+    
+    // If sessionId is provided, try to join an existing session
+    if (sessionId) {
+        console.log(`Attempting to join session with ID: ${sessionId}`);
+        
+        // First check if this is a full session ID
+        if (gameSessions[sessionId]) {
+            console.log(`Found session with full ID: ${sessionId}`);
+            return joinExistingSession(sessionId, playerId, playerName, role, res);
+        }
+        
+        // Next check if this is a short code
+        const matchingSession = findSessionByShortCode(sessionId);
+        if (matchingSession) {
+            console.log(`Found session with short code: ${sessionId}`);
+            return joinExistingSession(matchingSession, playerId, playerName, role, res);
+        }
+        
+        // Finally check if this is a session name
+        const sessionByName = findSessionByName(sessionId);
+        if (sessionByName) {
+            console.log(`Found session with name: ${sessionId}`);
+            return joinExistingSession(sessionByName, playerId, playerName, role, res);
+        }
+        
+        // If we got here, no matching session was found
+        return res.status(404).json({ error: 'Game session not found' });
+    }
+    
+    // Create a new session
+    const newSessionId = uuidv4();
+    console.log(`Creating new session with ID: ${newSessionId}`);
+    
+    // Initialize the game session
+    gameSessions[newSessionId] = {
+        id: newSessionId,
+        createdAt: new Date(),
+        players: {},
+        gameFacts: getDefaultGameFacts(),
+        sessionName: sessionName || `Game-${newSessionId.substring(0, 6)}`
+    };
+    
+    // Add the player to the session
+    const player = createPlayer(playerId, playerName, role);
+    gameSessions[newSessionId].players[playerId] = player;
+    players[playerId] = {
+        id: playerId,
+        sessionId: newSessionId
+    };
+    
+    // Return the session info
+    res.json({
+        sessionId: newSessionId,
+        sessionName: gameSessions[newSessionId].sessionName,
+        shortCode: newSessionId.substring(0, 6).toUpperCase(),
+        player: player
+    });
+});
+
+// Helper function to join an existing session
+function joinExistingSession(sessionId, playerId, playerName, role, res) {
+    if (!gameSessions[sessionId]) {
+        return res.status(404).json({ error: 'Game session not found' });
+    }
+    
+    // Create the player
+    const player = createPlayer(playerId, playerName, role);
+    
+    // Add player to session
+    gameSessions[sessionId].players[playerId] = player;
+    players[playerId] = {
+        id: playerId,
+        sessionId: sessionId
+    };
+    
+    // Return the session info
+    res.json({
+        sessionId: sessionId,
+        sessionName: gameSessions[sessionId].sessionName,
+        shortCode: sessionId.substring(0, 6).toUpperCase(),
+        player: player
+    });
 }
 
-// Initialize Express app
-const app = express();
-const server = http.createServer(app);
-const io = socketIo(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
-  }
-});
-
-// Apply middleware
-app.use(cors());
-app.use(express.json());
-
-// MongoDB connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/game_db')
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
-
-// Define schemas
-const GameSessionSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
-  shortId: { type: String, unique: true }, // Added for human-friendly IDs
-  startTime: { type: Date, default: Date.now },
-  lastUpdateTime: { type: Date, default: Date.now },
-  gameFacts: { type: Object, default: {} }
-});
-
-const PlayerSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
-  sessionId: { type: String, required: true, index: true },
-  name: { type: String, required: true },
-  role: { type: String, default: 'Astronaut' },
-  isHuman: { type: Boolean, default: true },
-  isActive: { type: Boolean, default: true },
-  currentLocation: { type: String, required: true, default: "0,1,2,1,2" }, // Default to CryoPod
-  inventory: { type: Map, of: Number, default: {} },
-  lastActivity: { type: Date, default: Date.now }
-});
-
-const MessageSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
-  sessionId: { type: String, required: true, index: true },
-  senderId: { type: String, required: true },
-  senderName: { type: String, required: true },
-  targetId: { type: String },
-  content: { type: String, required: true },
-  timestamp: { type: Date, default: Date.now },
-  isSystemMessage: { type: Boolean, default: false }
-});
-
-// Create models
-const GameSession = mongoose.model('GameSession', GameSessionSchema);
-const Player = mongoose.model('Player', PlayerSchema);
-const Message = mongoose.model('Message', MessageSchema);
-
-// Basic endpoints
-
-// 1. Join/Create Game
-app.post('/join', async (req, res) => {
-  try {
-    console.log("Join request received with body:", req.body);
-    const { sessionId, playerName, role } = req.body;
-    
-    // Check API key
-    const providedApiKey = req.headers.authorization?.split(' ')[1];
-    if (providedApiKey !== process.env.API_KEY) {
-      console.log("Unauthorized access attempt with key:", providedApiKey);
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    
-    // If sessionId provided, join existing game; otherwise, create new
-    let session;
-    if (sessionId) {
-      console.log(`Attempting to find session with ID or shortId: ${sessionId}`);
-      
-      // Try to find by short ID first (case-insensitive)
-      session = await GameSession.findOne({ 
-        shortId: { $regex: new RegExp(`^${sessionId}$`, "i") } 
-      });
-      
-      if (session) {
-        console.log(`Found session by shortId: ${sessionId}`);
-      } else {
-        // If not found, try by regular ID (case-insensitive)
-        session = await GameSession.findOne({ 
-          id: { $regex: new RegExp(`^${sessionId}$`, "i") } 
-        });
-        
-        if (session) {
-          console.log(`Found session by regular id: ${sessionId}`);
-        }
-      }
-      
-      if (!session) {
-        console.log(`No session found for ID: ${sessionId}`);
-        return res.status(404).json({ error: 'Game session not found' });
-      }
-    } else {
-      // Create new session with default game facts and a short ID
-      const newSessionId = uuidv4();
-      const shortId = generateShortId();
-      console.log(`Creating new session with ID: ${newSessionId}, shortId: ${shortId}`);
-      
-      session = new GameSession({
-        id: newSessionId,
-        shortId: shortId,
-        gameFacts: {
-          planetName: "Zeta Proxima b",
-          atmosphere: "Thin, breathable with assistance",
-          gravity: "0.8 Earth gravity",
-          temperature: "Variable, generally cool",
-          terrain: "Rocky plains with scattered crystalline formations",
-          timeElapsed: "0 hours",
-          year: "2174"
-        }
-      });
-      await session.save();
-    }
-    
-    // Create player
-    const player = new Player({
-      id: uuidv4(),
-      sessionId: session.id,
-      name: playerName,
-      role: role || 'Astronaut',
-      isHuman: true,
-      isActive: true,
-      inventory: { "Data Tablet": 1, "Emergency Kit": 1 }
-    });
-    
-    await player.save();
-    console.log(`Created player: ${player.id} with name: ${playerName} in session: ${session.id}`);
-    
-    // Create a system message about player joining
-    const joinMessage = new Message({
-      id: uuidv4(),
-      sessionId: session.id,
-      senderId: 'system',
-      senderName: 'System',
-      content: `${playerName} has joined the game.`,
-      isSystemMessage: true
-    });
-    
-    await joinMessage.save();
-    
-    // Prepare response
-    const responseObject = {
-      player: {
-        id: player.id,
-        name: player.name,
-        role: player.role,
-        currentLocation: player.currentLocation,
-        inventory: Object.fromEntries(player.inventory)
-      },
-      sessionId: session.id,
-      shortId: session.shortId
+// Helper to create a player object
+function createPlayer(id, name, role) {
+    return {
+        id: id,
+        name: name || 'Player',
+        role: role || 'Astronaut',
+        isHuman: true,
+        isActive: true,
+        currentLocation: '0,1,2,1,2', // Start in CryoPod
+        inventory: {},
+        lastActivity: new Date()
     };
-    
-    console.log("Sending response:", JSON.stringify(responseObject));
-    
-    // Notify other players via Socket.io
-    io.to(session.id).emit('playerJoined', {
-      id: player.id,
-      name: player.name,
-      role: player.role
-    });
-    
-    res.json(responseObject);
-  } catch (error) {
-    console.error('Error joining game:', error);
-    res.status(500).json({ error: 'Failed to join game' });
-  }
-});
+}
 
-// 2. Leave Game
-app.post('/leave', async (req, res) => {
-  try {
+// Find a session by its short code (first 6 characters of UUID)
+function findSessionByShortCode(shortCode) {
+    shortCode = shortCode.toLowerCase();
+    
+    for (const sessionId in gameSessions) {
+        if (sessionId.substring(0, 6).toLowerCase() === shortCode) {
+            return sessionId;
+        }
+    }
+    
+    return null;
+}
+
+// Find a session by its name
+function findSessionByName(name) {
+    name = name.toLowerCase();
+    
+    for (const sessionId in gameSessions) {
+        const session = gameSessions[sessionId];
+        if (session.sessionName && session.sessionName.toLowerCase() === name) {
+            return sessionId;
+        }
+    }
+    
+    return null;
+}
+
+// Leave a session
+app.post('/leave', validateApiKey, (req, res) => {
     const { sessionId, playerId } = req.body;
     
-    // Check API key
-    const providedApiKey = req.headers.authorization?.split(' ')[1];
-    if (providedApiKey !== process.env.API_KEY) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Session or player not found' });
     }
     
-    const player = await Player.findOne({ id: playerId, sessionId });
-    if (!player) {
-      return res.status(404).json({ error: 'Player not found' });
+    // Remove player from session
+    delete gameSessions[sessionId].players[playerId];
+    delete players[playerId];
+    
+    // Check if session is empty and clean up if needed
+    if (Object.keys(gameSessions[sessionId].players).length === 0) {
+        console.log(`Removing empty session: ${sessionId}`);
+        delete gameSessions[sessionId];
     }
-    
-    // Update player status
-    player.isHuman = false;
-    player.isActive = false;
-    player.lastActivity = new Date();
-    await player.save();
-    
-    // Create system message about player leaving
-    const leaveMessage = new Message({
-      id: uuidv4(),
-      sessionId: sessionId,
-      senderId: 'system',
-      senderName: 'System',
-      content: `${player.name} has left the game.`,
-      isSystemMessage: true
-    });
-    
-    await leaveMessage.save();
-    
-    // Notify other players
-    io.to(sessionId).emit('playerLeft', { 
-      id: playerId, 
-      name: player.name 
-    });
     
     res.json({ success: true });
-  } catch (error) {
-    console.error('Error leaving game:', error);
-    res.status(500).json({ error: 'Failed to leave game' });
-  }
 });
 
-// 3. Sync Game State - Now just providing data, not processing logic
-app.post('/sync', async (req, res) => {
-  try {
-    const { sessionId, playerId, currentLocation, inventory } = req.body;
+// Lookup a session by name or code
+app.post('/lookup', validateApiKey, (req, res) => {
+    const { sessionId, sessionName } = req.body;
     
-    // Check API key
-    const providedApiKey = req.headers.authorization?.split(' ')[1];
-    if (providedApiKey !== process.env.API_KEY) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    if (sessionId) {
+        // Look up by ID or short code
+        if (gameSessions[sessionId]) {
+            return res.json({ 
+                sessionId: sessionId,
+                sessionName: gameSessions[sessionId].sessionName
+            });
+        }
+        
+        // Try short code
+        const matchingSession = findSessionByShortCode(sessionId);
+        if (matchingSession) {
+            return res.json({ 
+                sessionId: matchingSession,
+                sessionName: gameSessions[matchingSession].sessionName
+            });
+        }
     }
     
-    // Get session and player
-    const session = await GameSession.findOne({ id: sessionId });
-    const player = await Player.findOne({ id: playerId, sessionId });
-    
-    if (!session || !player) {
-      return res.status(404).json({ error: 'Session or player not found' });
+    if (sessionName) {
+        // Look up by name
+        const sessionId = findSessionByName(sessionName);
+        if (sessionId) {
+            return res.json({ 
+                sessionId: sessionId,
+                sessionName: gameSessions[sessionId].sessionName
+            });
+        }
     }
     
-    // Update player state if provided
-    if (currentLocation) {
-      player.currentLocation = currentLocation;
+    res.status(404).json({ error: 'Session not found' });
+});
+
+// List active sessions
+app.post('/sessions', validateApiKey, (req, res) => {
+    const activeSessionsInfo = Object.entries(gameSessions).map(([id, session]) => ({
+        id: id,
+        shortCode: id.substring(0, 6).toUpperCase(),
+        name: session.sessionName,
+        playerCount: Object.keys(session.players).length,
+        createdAt: session.createdAt
+    }));
+    
+    res.json(activeSessionsInfo);
+});
+
+// Send a message
+app.post('/message', validateApiKey, (req, res) => {
+    const { sessionId, senderId, targetId, content } = req.body;
+    
+    if (!gameSessions[sessionId]) {
+        return res.status(404).json({ error: 'Session not found' });
     }
     
-    if (inventory) {
-      // Convert inventory object to Map for storage
-      player.inventory = new Map(Object.entries(inventory));
+    if (!gameSessions[sessionId].players[senderId]) {
+        return res.status(404).json({ error: 'Sender not found' });
     }
     
-    player.lastActivity = new Date();
-    await player.save();
+    if (targetId && !gameSessions[sessionId].players[targetId]) {
+        return res.status(404).json({ error: 'Target player not found' });
+    }
     
-    // Get all active players in this session
-    const allPlayers = await Player.find({ sessionId, isActive: true });
-    
-    // Get players in same location as current player
-    const playersInLocation = await Player.find({
-      sessionId,
-      isActive: true,
-      currentLocation: player.currentLocation
-    });
-    
-    // Get recent messages for this session
-    const messages = await Message.find({ sessionId })
-      .sort({ timestamp: -1 })
-      .limit(50);
-    
-    // Format response
-    const syncData = {
-      player: {
-        id: player.id,
-        name: player.name,
-        role: player.role,
-        currentLocation: player.currentLocation,
-        inventory: Object.fromEntries(player.inventory)
-      },
-      allPlayers: allPlayers.map(p => ({
-        id: p.id,
-        name: p.name,
-        role: p.role,
-        isHuman: p.isHuman,
-        currentLocation: p.currentLocation
-      })),
-      playersInLocation: playersInLocation.map(p => ({
-        id: p.id,
-        name: p.name,
-        role: p.role
-      })),
-      messages: messages.map(m => ({
-        id: m.id,
-        senderId: m.senderId,
-        senderName: m.senderName,
-        targetId: m.targetId,
-        content: m.content,
-        timestamp: m.timestamp.getTime(),
-        isSystemMessage: m.isSystemMessage
-      })),
-      gameFacts: session.gameFacts
+    // Create message object
+    const message = {
+        id: uuidv4(),
+        sessionId: sessionId,
+        senderId: senderId,
+        senderName: gameSessions[sessionId].players[senderId].name,
+        targetId: targetId || null,
+        content: content,
+        timestamp: new Date().getTime(),
+        isSystemMessage: false
     };
     
-    res.json(syncData);
-  } catch (error) {
-    console.error('Error syncing game state:', error);
-    res.status(500).json({ error: 'Failed to sync game state' });
-  }
-});
-
-// 4. Process Game Action - Simplified to just broadcast events
-app.post('/action', async (req, res) => {
-  try {
-    const { sessionId, playerId, action, result } = req.body;
-    
-    // Check API key
-    const providedApiKey = req.headers.authorization?.split(' ')[1];
-    if (providedApiKey !== process.env.API_KEY) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    // Add message to session
+    if (!gameSessions[sessionId].messages) {
+        gameSessions[sessionId].messages = [];
     }
+    gameSessions[sessionId].messages.push(message);
     
-    // Get player
-    const player = await Player.findOne({ id: playerId, sessionId });
-    if (!player) {
-      return res.status(404).json({ error: 'Player not found' });
+    // Limit message history
+    if (gameSessions[sessionId].messages.length > 100) {
+        gameSessions[sessionId].messages.shift();
     }
-    
-    // Update player's last activity
-    player.lastActivity = new Date();
-    await player.save();
-    
-    // Notify others in the same location about the action
-    io.to(sessionId).emit('playerAction', {
-      playerId: player.id,
-      playerName: player.name,
-      action: action,
-      location: player.currentLocation
-    });
-    
-    // Just return success - client handles the actual response
-    res.json({ 
-      success: true,
-      result: result || "Action received by server"
-    });
-    
-  } catch (error) {
-    console.error('Error processing action:', error);
-    res.status(500).json({ error: 'Failed to process action' });
-  }
-});
-
-// 5. Send Message between players
-app.post('/message', async (req, res) => {
-  try {
-    const { sessionId, senderId, content, targetId } = req.body;
-    
-    // Check API key
-    const providedApiKey = req.headers.authorization?.split(' ')[1];
-    if (providedApiKey !== process.env.API_KEY) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    
-    // Get sender
-    const sender = await Player.findOne({ id: senderId, sessionId });
-    if (!sender) {
-      return res.status(404).json({ error: 'Sender not found' });
-    }
-    
-    // Create message
-    const message = new Message({
-      id: uuidv4(),
-      sessionId,
-      senderId,
-      senderName: sender.name,
-      targetId,
-      content,
-      timestamp: new Date(),
-      isSystemMessage: false
-    });
-    
-    await message.save();
-    
-    // Update sender's last activity
-    sender.lastActivity = new Date();
-    await sender.save();
-    
-    // Notify players in session
-    io.to(sessionId).emit('newMessage', {
-      id: message.id,
-      senderId: message.senderId,
-      senderName: message.senderName,
-      targetId: message.targetId,
-      content: message.content,
-      timestamp: message.timestamp.getTime(),
-      isSystemMessage: message.isSystemMessage
-    });
     
     res.json({ success: true });
-  } catch (error) {
-    console.error('Error sending message:', error);
-    res.status(500).json({ error: 'Failed to send message' });
-  }
 });
 
-// 6. Transfer item between players
-app.post('/transferItem', async (req, res) => {
-  try {
+// Perform an action
+app.post('/action', validateApiKey, (req, res) => {
+    const { sessionId, playerId, action } = req.body;
+    
+    if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Session or player not found' });
+    }
+    
+    // Update player's last activity time
+    gameSessions[sessionId].players[playerId].lastActivity = new Date();
+    
+    // Add action to session history if needed
+    // This is a simplified version - in a real implementation, you'd process the action
+    
+    res.json({ result: `Action "${action}" received` });
+});
+
+// Update player location
+app.post('/updateLocation', validateApiKey, (req, res) => {
+    const { sessionId, playerId, locationId, forceUpdate } = req.body;
+    
+    if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Session or player not found' });
+    }
+    
+    const player = gameSessions[sessionId].players[playerId];
+    
+    // Only update if location has changed or force update is specified
+    if (forceUpdate || player.currentLocation !== locationId) {
+        console.log(`Updating player ${playerId} location to ${locationId}`);
+        player.currentLocation = locationId;
+        player.lastActivity = new Date();
+    }
+    
+    res.json({ success: true });
+});
+
+// Transfer item between players
+app.post('/transferItem', validateApiKey, (req, res) => {
     const { sessionId, fromPlayerId, toPlayerId, item, quantity } = req.body;
     
-    // Check API key
-    const providedApiKey = req.headers.authorization?.split(' ')[1];
-    if (providedApiKey !== process.env.API_KEY) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    if (!gameSessions[sessionId]) {
+        return res.status(404).json({ error: 'Session not found' });
     }
     
-    // Get players
-    const fromPlayer = await Player.findOne({ id: fromPlayerId, sessionId });
-    const toPlayer = await Player.findOne({ id: toPlayerId, sessionId });
-    
-    if (!fromPlayer || !toPlayer) {
-      return res.status(404).json({ error: 'One or both players not found' });
+    if (!gameSessions[sessionId].players[fromPlayerId]) {
+        return res.status(404).json({ error: 'Sender not found' });
     }
     
-    // Check if in same location
-    if (fromPlayer.currentLocation !== toPlayer.currentLocation) {
-      return res.status(400).json({ error: 'Players must be in the same location to transfer items' });
+    if (!gameSessions[sessionId].players[toPlayerId]) {
+        return res.status(404).json({ error: 'Recipient not found' });
     }
     
-    // Check if sender has enough of the item
-    const senderQuantity = fromPlayer.inventory.get(item) || 0;
-    if (senderQuantity < quantity) {
-      return res.status(400).json({ error: 'Not enough items to transfer' });
+    const fromPlayer = gameSessions[sessionId].players[fromPlayerId];
+    const toPlayer = gameSessions[sessionId].players[toPlayerId];
+    
+    // Check if sender has the item
+    if (!fromPlayer.inventory[item] || fromPlayer.inventory[item] < quantity) {
+        return res.status(400).json({ error: 'Not enough items to transfer' });
     }
     
-    // Update inventories
-    fromPlayer.inventory.set(item, senderQuantity - quantity);
-    toPlayer.inventory.set(item, (toPlayer.inventory.get(item) || 0) + quantity);
+    // Transfer the item
+    fromPlayer.inventory[item] -= quantity;
+    toPlayer.inventory[item] = (toPlayer.inventory[item] || 0) + quantity;
     
-    // Save changes
-    await fromPlayer.save();
-    await toPlayer.save();
-    
-    // Create system message about transfer
-    const transferMessage = new Message({
-      id: uuidv4(),
-      sessionId,
-      senderId: 'system',
-      senderName: 'System',
-      content: `${fromPlayer.name} gave ${quantity} ${item} to ${toPlayer.name}.`,
-      isSystemMessage: true
-    });
-    
-    await transferMessage.save();
-    
-    // Notify players
-    io.to(sessionId).emit('itemTransferred', {
-      fromPlayerId,
-      fromPlayerName: fromPlayer.name,
-      toPlayerId,
-      toPlayerName: toPlayer.name,
-      item,
-      quantity
-    });
+    // Clean up inventory (remove items with zero quantity)
+    if (fromPlayer.inventory[item] <= 0) {
+        delete fromPlayer.inventory[item];
+    }
     
     res.json({ success: true });
-  } catch (error) {
-    console.error('Error transferring item:', error);
-    res.status(500).json({ error: 'Failed to transfer item' });
-  }
 });
 
-// 7. Update player location
-app.post('/updateLocation', async (req, res) => {
-  try {
-    const { sessionId, playerId, location } = req.body;
+// Sync game state
+app.post('/sync', validateApiKey, (req, res) => {
+    const { sessionId, playerId } = req.body;
     
-    // Check API key
-    const providedApiKey = req.headers.authorization?.split(' ')[1];
-    if (providedApiKey !== process.env.API_KEY) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    if (!gameSessions[sessionId]) {
+        return res.status(404).json({ error: 'Session not found' });
     }
     
-    // Get player
-    const player = await Player.findOne({ id: playerId, sessionId });
-    if (!player) {
-      return res.status(404).json({ error: 'Player not found' });
+    if (!gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Player not found' });
     }
     
-    // Remember old location
-    const oldLocation = player.currentLocation;
+    // Update player's last activity time
+    gameSessions[sessionId].players[playerId].lastActivity = new Date();
     
-    // Update location
-    player.currentLocation = location;
-    player.lastActivity = new Date();
-    await player.save();
+    // Filter players by activity (last 5 minutes)
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    const activePlayers = {};
+    let inactivePlayers = 0;
     
-    // Notify players about movement
-    io.to(sessionId).emit('playerMoved', {
-      playerId: player.id,
-      playerName: player.name,
-      fromLocation: oldLocation,
-      toLocation: location
-    });
+    for (const pid in gameSessions[sessionId].players) {
+        const player = gameSessions[sessionId].players[pid];
+        if (new Date(player.lastActivity) > fiveMinutesAgo) {
+            activePlayers[pid] = player;
+        } else {
+            inactivePlayers++;
+        }
+    }
     
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error updating location:', error);
-    res.status(500).json({ error: 'Failed to update location' });
-  }
+    // For large sessions, periodically clean up inactive players
+    if (inactivePlayers > 10) {
+        for (const pid in gameSessions[sessionId].players) {
+            const player = gameSessions[sessionId].players[pid];
+            if (new Date(player.lastActivity) <= fiveMinutesAgo) {
+                delete gameSessions[sessionId].players[pid];
+                delete players[pid];
+            }
+        }
+    }
+    
+    // Get players in the same location
+    const currentLocation = gameSessions[sessionId].players[playerId].currentLocation;
+    const playersInLocation = Object.values(activePlayers).filter(p => 
+        p.currentLocation === currentLocation
+    );
+    
+    // Prepare response data
+    const responseData = {
+        sessionId: sessionId,
+        sessionName: gameSessions[sessionId].sessionName,
+        player: gameSessions[sessionId].players[playerId],
+        allPlayers: Object.values(activePlayers),
+        playersInLocation: playersInLocation,
+        messages: gameSessions[sessionId].messages || [],
+        gameFacts: gameSessions[sessionId].gameFacts || getDefaultGameFacts()
+    };
+    
+    res.json(responseData);
 });
 
-// Socket.io connection handling
-io.on('connection', (socket) => {
-  console.log('New client connected');
-  
-  socket.on('join', ({ sessionId, playerId }) => {
-    if (sessionId && playerId) {
-      socket.join(sessionId);
-      socket.playerId = playerId;
-      socket.sessionId = sessionId;
-      console.log(`Player ${playerId} connected to session ${sessionId}`);
+// Default game facts
+function getDefaultGameFacts() {
+    return {
+        planetName: "Zeta Proxima b",
+        atmosphere: "Thin, breathable with assistance",
+        gravity: "0.8 Earth gravity",
+        temperature: "Variable, generally cool",
+        terrain: "Rocky plains with scattered crystalline formations",
+        flora: "Bioluminescent lichen and hardy shrubs",
+        fauna: "Small, insect-like creatures",
+        resources: "Rare minerals and crystals",
+        timeElapsed: "0 hours",
+        year: "2174"
+    };
+}
+
+// Session maintenance - periodically clean up empty sessions
+setInterval(() => {
+    const now = new Date();
+    for (const sessionId in gameSessions) {
+        const session = gameSessions[sessionId];
+        // Remove sessions that are empty or inactive for more than 24 hours
+        const sessionAge = now - new Date(session.createdAt);
+        const isOld = sessionAge > 24 * 60 * 60 * 1000; // 24 hours
+        const isEmpty = Object.keys(session.players).length === 0;
+        
+        if (isEmpty || isOld) {
+            console.log(`Cleaning up session ${sessionId}: isEmpty=${isEmpty}, isOld=${isOld}`);
+            delete gameSessions[sessionId];
+            
+            // Clean up any players still associated with this session
+            if (!isEmpty) {
+                for (const playerId in players) {
+                    if (players[playerId].sessionId === sessionId) {
+                        delete players[playerId];
+                    }
+                }
+            }
+        }
     }
-  });
-  
-  socket.on('disconnect', () => {
-    console.log('Client disconnected');
-  });
-});
+}, 60 * 60 * 1000); // Run every hour
 
 // Start the server
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Stranded Astronaut Server v${SERVER_VERSION} running on port ${PORT}`);
+app.listen(port, () => {
+    console.log(`Stranded Astronaut server running on port ${port}`);
 });
