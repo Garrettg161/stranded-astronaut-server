@@ -110,8 +110,9 @@ app.post('/join', validateApiKey, (req, res) => {
         players: {},
         gameFacts: getDefaultGameFacts(),
         sessionName: actualSessionName,
-        globalTurn: 0,                  // Add global turn counter
-        timeElapsed: "0h 0m"            // Add global time elapsed
+        globalTurn: 0,
+        timeElapsed: "1h 0m",           // Initialize with non-zero time
+        preserveClientState: true        // Add flag to preserve client state during syncs
     };
     
     // Add the player to the session
@@ -128,8 +129,8 @@ app.post('/join', validateApiKey, (req, res) => {
         sessionName: actualSessionName,
         shortCode: newSessionId.substring(0, 6).toUpperCase(),
         player: player,
-        globalTurn: 0,                  // Include global turn in response
-        timeElapsed: "0h 0m"            // Include time elapsed in response
+        globalTurn: 0,
+        timeElapsed: "1h 0m"
     });
 });
 
@@ -155,8 +156,9 @@ function joinExistingSession(sessionId, playerId, playerName, res) {
         sessionName: gameSessions[sessionId].sessionName,
         shortCode: sessionId.substring(0, 6).toUpperCase(),
         player: player,
-        globalTurn: gameSessions[sessionId].globalTurn || 0,        // Include global turn
-        timeElapsed: gameSessions[sessionId].timeElapsed || "0h 0m" // Include time elapsed
+        globalTurn: gameSessions[sessionId].globalTurn || 0,
+        timeElapsed: gameSessions[sessionId].timeElapsed || "1h 0m",
+        preserveClientState: true
     });
 }
 
@@ -215,7 +217,7 @@ app.post('/lookup', validateApiKey, (req, res) => {
             shortCode: id.substring(0, 6).toUpperCase(),
             playerCount: Object.keys(session.players).length,
             globalTurn: session.globalTurn || 0,
-            timeElapsed: session.timeElapsed || "0h 0m"
+            timeElapsed: session.timeElapsed || "1h 0m"
         }))
     });
 });
@@ -295,10 +297,17 @@ app.post('/updateLocation', validateApiKey, (req, res) => {
     }
     
     const player = gameSessions[sessionId].players[playerId];
+    const oldLocation = player.currentLocation;
     player.currentLocation = locationId;
     player.lastActivity = new Date();
     
-    res.json({ success: true });
+    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} → ${locationId}`);
+    
+    res.json({ 
+        success: true,
+        previousLocation: oldLocation,
+        newLocation: locationId
+    });
 });
 
 // Update session time elapsed
@@ -310,7 +319,14 @@ app.post('/updateTime', validateApiKey, (req, res) => {
     }
     
     // Update the time elapsed in the session
-    gameSessions[sessionId].timeElapsed = timeElapsed;
+    if (timeElapsed !== "0h 0m") {  // Don't accept zero time updates
+        gameSessions[sessionId].timeElapsed = timeElapsed;
+        
+        // Update game facts if they exist
+        if (gameSessions[sessionId].gameFacts) {
+            gameSessions[sessionId].gameFacts.timeElapsed = timeElapsed;
+        }
+    }
     
     res.json({ 
         success: true,
@@ -397,7 +413,8 @@ app.post('/sync', validateApiKey, (req, res) => {
         messages: gameSessions[sessionId].messages || [],
         gameFacts: gameSessions[sessionId].gameFacts || getDefaultGameFacts(),
         globalTurn: gameSessions[sessionId].globalTurn || 0,
-        timeElapsed: gameSessions[sessionId].timeElapsed || "0h 0m"
+        timeElapsed: gameSessions[sessionId].timeElapsed || "1h 0m",
+        preserveClientState: true  // Always tell client to preserve its own state
     };
     
     res.json(responseData);
@@ -414,7 +431,7 @@ function getDefaultGameFacts() {
         flora: "Bioluminescent lichen and hardy shrubs",
         fauna: "Small, insect-like creatures",
         resources: "Rare minerals and crystals",
-        timeElapsed: "0h 0m",
+        timeElapsed: "1h 0m",  // Initialize with non-zero time
         year: "2174"
     };
 }
