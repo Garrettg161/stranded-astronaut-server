@@ -34,7 +34,7 @@ const players = {};
 
 // Routes
 app.get('/', (req, res) => {
-    res.send('Stranded Astronaut Multiplayer Server v2.0');
+    res.send('Stranded Astronaut Multiplayer Server v2.1');
 });
 
 // Create or join a session
@@ -109,7 +109,9 @@ app.post('/join', validateApiKey, (req, res) => {
         createdAt: new Date(),
         players: {},
         gameFacts: getDefaultGameFacts(),
-        sessionName: actualSessionName
+        sessionName: actualSessionName,
+        globalTurn: 0,                  // Add global turn counter
+        timeElapsed: "0h 0m"            // Add global time elapsed
     };
     
     // Add the player to the session
@@ -125,7 +127,9 @@ app.post('/join', validateApiKey, (req, res) => {
         sessionId: newSessionId,
         sessionName: actualSessionName,
         shortCode: newSessionId.substring(0, 6).toUpperCase(),
-        player: player
+        player: player,
+        globalTurn: 0,                  // Include global turn in response
+        timeElapsed: "0h 0m"            // Include time elapsed in response
     });
 });
 
@@ -150,7 +154,9 @@ function joinExistingSession(sessionId, playerId, playerName, res) {
         sessionId: sessionId,
         sessionName: gameSessions[sessionId].sessionName,
         shortCode: sessionId.substring(0, 6).toUpperCase(),
-        player: player
+        player: player,
+        globalTurn: gameSessions[sessionId].globalTurn || 0,        // Include global turn
+        timeElapsed: gameSessions[sessionId].timeElapsed || "0h 0m" // Include time elapsed
     });
 }
 
@@ -207,7 +213,9 @@ app.post('/lookup', validateApiKey, (req, res) => {
             id: id,
             name: session.sessionName,
             shortCode: id.substring(0, 6).toUpperCase(),
-            playerCount: Object.keys(session.players).length
+            playerCount: Object.keys(session.players).length,
+            globalTurn: session.globalTurn || 0,
+            timeElapsed: session.timeElapsed || "0h 0m"
         }))
     });
 });
@@ -265,7 +273,17 @@ app.post('/action', validateApiKey, (req, res) => {
     // Update player's last activity time
     gameSessions[sessionId].players[playerId].lastActivity = new Date();
     
-    res.json({ result: `Action "${action}" received` });
+    // Increment global turn counter for each action
+    if (!gameSessions[sessionId].globalTurn) {
+        gameSessions[sessionId].globalTurn = 0;
+    }
+    gameSessions[sessionId].globalTurn += 1;
+    
+    // Return the updated global turn
+    res.json({ 
+        result: `Action "${action}" received`,
+        globalTurn: gameSessions[sessionId].globalTurn
+    });
 });
 
 // Update player location
@@ -281,6 +299,23 @@ app.post('/updateLocation', validateApiKey, (req, res) => {
     player.lastActivity = new Date();
     
     res.json({ success: true });
+});
+
+// Update session time elapsed
+app.post('/updateTime', validateApiKey, (req, res) => {
+    const { sessionId, timeElapsed } = req.body;
+    
+    if (!gameSessions[sessionId]) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
+    
+    // Update the time elapsed in the session
+    gameSessions[sessionId].timeElapsed = timeElapsed;
+    
+    res.json({ 
+        success: true,
+        timeElapsed: gameSessions[sessionId].timeElapsed
+    });
 });
 
 // Transfer item between players
@@ -360,7 +395,9 @@ app.post('/sync', validateApiKey, (req, res) => {
         allPlayers: Object.values(activePlayers),
         playersInLocation: playersInLocation,
         messages: gameSessions[sessionId].messages || [],
-        gameFacts: gameSessions[sessionId].gameFacts || getDefaultGameFacts()
+        gameFacts: gameSessions[sessionId].gameFacts || getDefaultGameFacts(),
+        globalTurn: gameSessions[sessionId].globalTurn || 0,
+        timeElapsed: gameSessions[sessionId].timeElapsed || "0h 0m"
     };
     
     res.json(responseData);
@@ -377,12 +414,12 @@ function getDefaultGameFacts() {
         flora: "Bioluminescent lichen and hardy shrubs",
         fauna: "Small, insect-like creatures",
         resources: "Rare minerals and crystals",
-        timeElapsed: "0 hours",
+        timeElapsed: "0h 0m",
         year: "2174"
     };
 }
 
 // Start the server
 app.listen(port, () => {
-    console.log(`Stranded Astronaut Multiplayer Server v2.0 running on port ${port}`);
+    console.log(`Stranded Astronaut Multiplayer Server v2.1 running on port ${port}`);
 });
