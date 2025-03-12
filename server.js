@@ -34,7 +34,7 @@ const players = {};
 
 // Routes
 app.get('/', (req, res) => {
-    res.send('Stranded Astronaut Multiplayer Server v2.1');
+    res.send('Stranded Astronaut Multiplayer Server v2.2');
 });
 
 // Create or join a session
@@ -112,7 +112,8 @@ app.post('/join', validateApiKey, (req, res) => {
         sessionName: actualSessionName,
         globalTurn: 0,
         timeElapsed: "1h 0m",           // Initialize with non-zero time
-        preserveClientState: true        // Add flag to preserve client state during syncs
+        preserveClientState: true,       // Add flag to preserve client state during syncs
+        plotQuestions: {}                // Initialize empty plot questions
     };
     
     // Add the player to the session
@@ -370,6 +371,78 @@ app.post('/transferItem', validateApiKey, (req, res) => {
     res.json({ success: true });
 });
 
+// NEW ENDPOINT: Sync plot state
+app.post('/syncPlotState', validateApiKey, (req, res) => {
+    const { sessionId, playerId, plotQuestions } = req.body;
+    
+    console.log(`Plot sync request received from player ${playerId}`);
+    
+    if (!gameSessions[sessionId]) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
+    
+    if (!gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Player not found' });
+    }
+    
+    // If the request contains plot questions, update the session's plot state
+    if (plotQuestions && typeof plotQuestions === 'object') {
+        console.log(`Updating plot state for session ${sessionId}`);
+        console.log(`Received ${Object.keys(plotQuestions).length} plot questions`);
+        
+        // Initialize if not exists
+        if (!gameSessions[sessionId].plotQuestions) {
+            gameSessions[sessionId].plotQuestions = {};
+        }
+        
+        // Update with new plot questions
+        for (const [number, questionData] of Object.entries(plotQuestions)) {
+            // Only update if the question has a valid state
+            if (questionData && questionData.state) {
+                console.log(`Updating question ${number} to state: ${questionData.state}`);
+                
+                // Store or update this question
+                gameSessions[sessionId].plotQuestions[number] = {
+                    ...questionData,
+                    lastUpdated: new Date().getTime(),
+                    updatedBy: playerId
+                };
+            }
+        }
+        
+        // Create a broadcast message for all clients
+        const broadcastMessage = {
+            id: uuidv4(),
+            sessionId: sessionId,
+            senderId: "system",
+            senderName: "System",
+            targetId: null,
+            content: `PLOT_STATE_UPDATE:${JSON.stringify(gameSessions[sessionId].plotQuestions)}`,
+            timestamp: new Date().getTime(),
+            isSystemMessage: true
+        };
+        
+        // Add to session messages
+        if (!gameSessions[sessionId].messages) {
+            gameSessions[sessionId].messages = [];
+        }
+        gameSessions[sessionId].messages.push(broadcastMessage);
+        
+        // Limit message history
+        if (gameSessions[sessionId].messages.length > 100) {
+            gameSessions[sessionId].messages.shift();
+        }
+        
+        console.log(`Plot state update broadcast to all clients in session ${sessionId}`);
+    }
+    
+    // Return the current plot state from the server
+    res.json({
+        success: true,
+        plotQuestions: gameSessions[sessionId].plotQuestions || {}
+    });
+});
+
 // Sync game state
 app.post('/sync', validateApiKey, (req, res) => {
     const { sessionId, playerId } = req.body;
@@ -414,7 +487,8 @@ app.post('/sync', validateApiKey, (req, res) => {
         gameFacts: gameSessions[sessionId].gameFacts || getDefaultGameFacts(),
         globalTurn: gameSessions[sessionId].globalTurn || 0,
         timeElapsed: gameSessions[sessionId].timeElapsed || "1h 0m",
-        preserveClientState: true  // Always tell client to preserve its own state
+        preserveClientState: true,  // Always tell client to preserve its own state
+        plotQuestions: gameSessions[sessionId].plotQuestions || {}  // Include plot questions in sync
     };
     
     res.json(responseData);
@@ -438,5 +512,5 @@ function getDefaultGameFacts() {
 
 // Start the server
 app.listen(port, () => {
-    console.log(`Stranded Astronaut Multiplayer Server v2.1 running on port ${port}`);
+    console.log(`Stranded Astronaut Multiplayer Server v2.2 running on port ${port}`);
 });
