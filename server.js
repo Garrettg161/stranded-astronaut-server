@@ -34,7 +34,12 @@ const players = {};
 
 // Routes
 app.get('/', (req, res) => {
-    res.send('Stranded Astronaut Multiplayer Server v2.2');
+    res.send('Stranded Astronaut Multiplayer Server v2.3 with Resistance Feed Support');
+});
+
+// Ping endpoint for connection checking
+app.post('/ping', validateApiKey, (req, res) => {
+    res.json({ success: true, timestamp: Date.now() });
 });
 
 // Create or join a session
@@ -113,7 +118,9 @@ app.post('/join', validateApiKey, (req, res) => {
         globalTurn: 0,
         timeElapsed: "1h 0m",           // Initialize with non-zero time
         preserveClientState: true,       // Add flag to preserve client state during syncs
-        plotQuestions: {}                // Initialize empty plot questions
+        plotQuestions: {},               // Initialize empty plot questions
+        feedItems: [],                   // Initialize empty feed items array
+        messages: []                     // Initialize empty messages array
     };
     
     // Add the player to the session
@@ -168,12 +175,19 @@ function createPlayer(id, name) {
     return {
         id: id,
         name: name || 'Player',
-        role: 'Astronaut',
+        role: 'Member',
         isHuman: true,
         isActive: true,
         currentLocation: '0,1,2,1,2', // Start in CryoPod
         inventory: {},
-        lastActivity: new Date()
+        lastActivity: new Date(),
+        // New profile data for resistance feed
+        profileData: {
+            username: name || 'Anonymous',
+            organizations: ["Resistance"],
+            topicFilters: [],
+            dateJoined: new Date()
+        }
     };
 }
 
@@ -488,10 +502,216 @@ app.post('/sync', validateApiKey, (req, res) => {
         globalTurn: gameSessions[sessionId].globalTurn || 0,
         timeElapsed: gameSessions[sessionId].timeElapsed || "1h 0m",
         preserveClientState: true,  // Always tell client to preserve its own state
-        plotQuestions: gameSessions[sessionId].plotQuestions || {}  // Include plot questions in sync
+        plotQuestions: gameSessions[sessionId].plotQuestions || {},  // Include plot questions in sync
+        feedItems: gameSessions[sessionId].feedItems || []  // Include feed items in sync
     };
     
     res.json(responseData);
+});
+
+// Organizations endpoint
+app.post('/organizations', validateApiKey, (req, res) => {
+    // Sample organizations - in a real app, these would come from a database
+    const organizations = [
+        {
+            id: "org1",
+            name: "Resistance",
+            description: "The default organization for all users fighting for freedom of information.",
+            authorRoles: ["Member", "Editor", "Admin"]
+        },
+        {
+            id: "org2",
+            name: "Free Press Alliance",
+            description: "A coalition of journalists dedicated to independent reporting.",
+            authorRoles: ["Editor", "Admin"]
+        },
+        {
+            id: "org3",
+            name: "Digital Rights Network",
+            description: "Advocates for privacy and digital freedom in the surveillance age.",
+            authorRoles: ["Member", "Editor", "Admin"]
+        },
+        {
+            id: "org4",
+            name: "Truth Seekers",
+            description: "Independent investigators uncovering hidden facts.",
+            authorRoles: ["Member", "Editor", "Admin"]
+        },
+        {
+            id: "org5",
+            name: "Community Voice",
+            description: "Grassroots movement focused on local impact stories.",
+            authorRoles: ["Editor", "Admin"]
+        }
+    ];
+    
+    res.json({ organizations });
+});
+
+// Feed operations endpoint
+app.post('/feed', validateApiKey, (req, res) => {
+    const { sessionId, playerId, action, feedItem } = req.body;
+    
+    if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Session or player not found' });
+    }
+    
+    // Initialize feed items array for this session if it doesn't exist
+    if (!gameSessions[sessionId].feedItems) {
+        gameSessions[sessionId].feedItems = [];
+    }
+    
+    // Handle different actions
+    switch (action) {
+        case 'publish':
+            // Add the feed item to the session's feed items
+            if (feedItem) {
+                gameSessions[sessionId].feedItems.push(feedItem);
+                
+                // Also create a message to notify all users
+                const messageContent = `FEED_ITEM:${JSON.stringify(feedItem)}`;
+                
+                // Create message object
+                const message = {
+                    id: uuidv4(),
+                    sessionId: sessionId,
+                    senderId: playerId,
+                    senderName: gameSessions[sessionId].players[playerId].name,
+                    targetId: null,
+                    content: messageContent,
+                    timestamp: new Date().getTime(),
+                    isSystemMessage: false
+                };
+                
+                // Add to messages
+                if (!gameSessions[sessionId].messages) {
+                    gameSessions[sessionId].messages = [];
+                }
+                gameSessions[sessionId].messages.push(message);
+                
+                res.json({ success: true, feedItemId: feedItem.id });
+            } else {
+                res.status(400).json({ error: 'Missing feed item data' });
+            }
+            break;
+            
+        case 'get':
+            // Return all feed items for this session
+            res.json({ 
+                success: true, 
+                feedItems: gameSessions[sessionId].feedItems || []
+            });
+            break;
+            
+        case 'delete':
+            // Delete a feed item
+            if (feedItem && feedItem.id) {
+                // Find and remove from array
+                const index = gameSessions[sessionId].feedItems.findIndex(item => item.id === feedItem.id);
+                if (index !== -1) {
+                    gameSessions[sessionId].feedItems.splice(index, 1);
+                    
+                    // Create delete notification message
+                    const deleteMessage = {
+                        id: uuidv4(),
+                        sessionId: sessionId,
+                        senderId: playerId,
+                        senderName: gameSessions[sessionId].players[playerId].name,
+                        targetId: null,
+                        content: `DELETE_FEED_ITEM:${feedItem.id}`,
+                        timestamp: new Date().getTime(),
+                        isSystemMessage: false
+                    };
+                    
+                    // Add to messages
+                    gameSessions[sessionId].messages.push(deleteMessage);
+                    
+                    res.json({ success: true });
+                } else {
+                    res.status(404).json({ error: 'Feed item not found' });
+                }
+            } else {
+                res.status(400).json({ error: 'Missing feed item ID' });
+            }
+            break;
+            
+        default:
+            res.status(400).json({ error: 'Unknown action' });
+    }
+});
+
+// User profile updates
+app.post('/updateProfile', validateApiKey, (req, res) => {
+    const { sessionId, playerId, userProfile } = req.body;
+    
+    if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Session or player not found' });
+    }
+    
+    // Update player information
+    const player = gameSessions[sessionId].players[playerId];
+    
+    if (userProfile) {
+        // Update player properties
+        player.name = userProfile.username || player.name;
+        player.role = userProfile.role || player.role;
+        
+        // Store additional user profile data
+        if (!player.profileData) {
+            player.profileData = {};
+        }
+        
+        player.profileData = {
+            ...player.profileData,
+            ...userProfile
+        };
+        
+        res.json({ 
+            success: true,
+            player: {
+                id: player.id,
+                name: player.name,
+                role: player.role,
+                profileData: player.profileData
+            }
+        });
+    } else {
+        res.status(400).json({ error: 'Missing user profile data' });
+    }
+});
+
+// Check permissions
+app.post('/checkPermissions', validateApiKey, (req, res) => {
+    const { sessionId, playerId, organization } = req.body;
+    
+    if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Session or player not found' });
+    }
+    
+    const player = gameSessions[sessionId].players[playerId];
+    
+    // In a real implementation, you would check against your organization database
+    // For our example app, we'll use a simplified check
+    
+    // Default organization permissions (allow all members to post)
+    let canPost = true;
+    
+    // For other organizations, check role restrictions
+    if (organization && organization !== "Resistance") {
+        // Free Press Alliance only allows Editors and Admins to post
+        if (organization === "Free Press Alliance" && player.role === "Member") {
+            canPost = false;
+        }
+    }
+    
+    res.json({
+        success: true,
+        permissions: {
+            canPost: canPost,
+            role: player.role,
+            organization: organization || "Resistance"
+        }
+    });
 });
 
 // Default game facts
@@ -512,5 +732,5 @@ function getDefaultGameFacts() {
 
 // Start the server
 app.listen(port, () => {
-    console.log(`Stranded Astronaut Multiplayer Server v2.2 running on port ${port}`);
+    console.log(`Stranded Astronaut Multiplayer Server v2.3 with Resistance Feed Support running on port ${port}`);
 });
