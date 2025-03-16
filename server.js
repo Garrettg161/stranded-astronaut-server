@@ -122,9 +122,15 @@ app.post('/join', validateApiKey, (req, res) => {
         timeElapsed: "1h 0m",           // Initialize with non-zero time
         preserveClientState: true,       // Add flag to preserve client state during syncs
         plotQuestions: {},               // Initialize empty plot questions
-        feedItems: global.allFeedItems.slice(),  // Use copies of the global feed items
+        feedItems: [],                   // Initialize empty feed items array
         messages: []                     // Initialize empty messages array
     };
+    
+    // Add any global feed items to this new session
+    if (global.allFeedItems && global.allFeedItems.length > 0) {
+        gameSessions[newSessionId].feedItems = [...global.allFeedItems];
+        console.log(`Added ${global.allFeedItems.length} global feed items to new session`);
+    }
     
     // Add the player to the session
     const player = createPlayer(playerId, playerName);
@@ -167,11 +173,18 @@ function joinExistingSession(sessionId, playerId, playerName, res) {
     }
     
     // Add any global feed items not already in this session
-    global.allFeedItems.forEach(item => {
-        if (!gameSessions[sessionId].feedItems.some(sessionItem => sessionItem.id === item.id)) {
-            gameSessions[sessionId].feedItems.push(item);
-        }
-    });
+    if (global.allFeedItems && global.allFeedItems.length > 0) {
+        global.allFeedItems.forEach(item => {
+            // Only add if not already present (by ID)
+            const exists = gameSessions[sessionId].feedItems.some(
+                existingItem => existingItem.id === item.id
+            );
+            
+            if (!exists) {
+                gameSessions[sessionId].feedItems.push(item);
+            }
+        });
+    }
     
     // Return the session info
     res.json({
@@ -302,7 +315,12 @@ app.post('/message', validateApiKey, (req, res) => {
             console.log(`Received feed item via message: ${feedItem.title}`);
             
             // Add to global feed items if not already present
-            if (!global.allFeedItems.some(item => item.id === feedItem.id)) {
+            if (!global.allFeedItems) {
+                global.allFeedItems = [];
+            }
+            
+            const alreadyInGlobal = global.allFeedItems.some(item => item.id === feedItem.id);
+            if (!alreadyInGlobal) {
                 global.allFeedItems.push(feedItem);
                 console.log(`Added feed item to global pool: ${feedItem.id}`);
             }
@@ -315,7 +333,8 @@ app.post('/message', validateApiKey, (req, res) => {
                 }
                 
                 // Add if not already in this session
-                if (!session.feedItems.some(item => item.id === feedItem.id)) {
+                const alreadyInSession = session.feedItems.some(item => item.id === feedItem.id);
+                if (!alreadyInSession) {
                     session.feedItems.push(feedItem);
                     console.log(`Added feed item to session ${session.id}: ${feedItem.id}`);
                 }
@@ -538,29 +557,30 @@ app.post('/sync', validateApiKey, (req, res) => {
         p.currentLocation === currentLocation
     );
     
-    // Make sure to include ALL feed items from the global pool
-    let feedItemsToSend = global.allFeedItems || [];
+    // Initialize feedItems arrays if needed
+    if (!global.allFeedItems) {
+        global.allFeedItems = [];
+    }
     
-    // Make sure the session has the latest feed items
     if (!gameSessions[sessionId].feedItems) {
         gameSessions[sessionId].feedItems = [];
     }
     
-    // Synchronize session feed items with global feed items
+    // Make sure the session has the latest feed items
     global.allFeedItems.forEach(item => {
-        if (!gameSessions[sessionId].feedItems.some(sessionItem => sessionItem.id === item.id)) {
+        const exists = gameSessions[sessionId].feedItems.some(
+            sessionItem => sessionItem.id === item.id
+        );
+        
+        if (!exists) {
             gameSessions[sessionId].feedItems.push(item);
         }
     });
     
-    // If requested, send the full global list, otherwise send the session's list
-    if (includeAllItems) {
-        feedItemsToSend = global.allFeedItems;
-        console.log(`Sending all ${feedItemsToSend.length} global feed items to client`);
-    } else {
-        feedItemsToSend = gameSessions[sessionId].feedItems;
-        console.log(`Sending ${feedItemsToSend.length} session feed items to client`);
-    }
+    // Determine which feed items to send
+    let feedItemsToSend = includeAllItems === true 
+        ? global.allFeedItems 
+        : gameSessions[sessionId].feedItems;
     
     // Prepare response data
     const responseData = {
@@ -576,7 +596,7 @@ app.post('/sync', validateApiKey, (req, res) => {
         timeElapsed: gameSessions[sessionId].timeElapsed || "1h 0m",
         preserveClientState: true,  // Always tell client to preserve its own state
         plotQuestions: gameSessions[sessionId].plotQuestions || {},  // Include plot questions in sync
-        feedItems: feedItemsToSend  // Send feed items to client
+        feedItems: feedItemsToSend || []  // Send feed items to client
     };
     
     res.json(responseData);
@@ -646,11 +666,19 @@ app.post('/feed', validateApiKey, (req, res) => {
             if (feedItem) {
                 console.log(`Publishing feed item: ${feedItem.title} [${feedItem.id}]`);
                 
-                // Add to global feed items
-                global.allFeedItems.push(feedItem);
+                // Add to global feed items if not already there
+                const alreadyInGlobal = global.allFeedItems.some(item => item.id === feedItem.id);
+                if (!alreadyInGlobal) {
+                    global.allFeedItems.push(feedItem);
+                    console.log(`Added item to global feed items pool`);
+                }
                 
-                // Add to session feed items
-                gameSessions[sessionId].feedItems.push(feedItem);
+                // Add to session feed items if not already there
+                const alreadyInSession = gameSessions[sessionId].feedItems.some(item => item.id === feedItem.id);
+                if (!alreadyInSession) {
+                    gameSessions[sessionId].feedItems.push(feedItem);
+                    console.log(`Added item to session ${sessionId} feed items`);
+                }
                 
                 // Also create a message to notify all users
                 const messageContent = `FEED_ITEM:${JSON.stringify(feedItem)}`;
@@ -685,8 +713,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                     }
                     
                     // Only add if not already present (by ID)
-                    if (!session.feedItems.some(item => item.id === feedItem.id)) {
+                    const alreadyInTargetSession = session.feedItems.some(item => item.id === feedItem.id);
+                    if (!alreadyInTargetSession) {
                         session.feedItems.push(feedItem);
+                        console.log(`Propagated feed item to session: ${sessId}`);
                     }
                 });
                 
@@ -789,40 +819,4 @@ app.post('/updateProfile', validateApiKey, (req, res) => {
         
         res.json({ 
             success: true,
-            player: {
-                id: player.id,
-                name: player.name,
-                role: player.role,
-                profileData: player.profileData
-            }
-        });
-    } else {
-        res.status(400).json({ error: 'Missing user profile data' });
-    }
-});
-
-// Check permissions
-app.post('/checkPermissions', validateApiKey, (req, res) => {
-    const { sessionId, playerId, organization } = req.body;
-    
-    if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
-        return res.status(404).json({ error: 'Session or player not found' });
-    }
-    
-    const player = gameSessions[sessionId].players[playerId];
-    
-    // In a real implementation, you would check against your organization database
-    // For our example app, we'll use a simplified check
-    
-    // Default organization permissions (allow all members to post)
-    let canPost = true;
-    
-    // For other organizations, check role restrictions
-    if (organization && organization !== "Resistance") {
-        // Free Press Alliance only allows Editors and Admins to post
-        if (organization === "Free Press Alliance" && player.role === "Member") {
-            canPost = false;
-        }
-    }
-    
-    res.
+            player
