@@ -819,4 +819,70 @@ app.post('/updateProfile', validateApiKey, (req, res) => {
         
         res.json({ 
             success: true,
-            player
+            player: {
+                id: player.id,
+                name: player.name,
+                role: player.role,
+                profileData: player.profileData
+            }
+        });
+    } else {
+        res.status(400).json({ error: 'Missing user profile data' });
+    }
+});
+
+// Check permissions
+app.post('/checkPermissions', validateApiKey, (req, res) => {
+    const { sessionId, playerId, organization } = req.body;
+    
+    if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Session or player not found' });
+    }
+    
+    const player = gameSessions[sessionId].players[playerId];
+    
+    // In a real implementation, you would check against your organization database
+    // For our example app, we'll use a simplified check
+    
+    // Default organization permissions (allow all members to post)
+    let canPost = true;
+    
+    // For other organizations, check role restrictions
+    if (organization && organization !== "Resistance") {
+        // Free Press Alliance only allows Editors and Admins to post
+        if (organization === "Free Press Alliance" && player.role === "Member") {
+            canPost = false;
+        }
+    }
+    
+    res.json({
+        success: true,
+        permissions: {
+            canPost: canPost,
+            role: player.role,
+            organization: organization || "Resistance"
+        }
+    });
+});
+
+// Default game facts
+function getDefaultGameFacts() {
+    return {
+        planetName: "Zeta Proxima b",
+        atmosphere: "Thin, breathable with assistance",
+        gravity: "0.8 Earth gravity",
+        temperature: "Variable, generally cool",
+        terrain: "Rocky plains with scattered crystalline formations",
+        flora: "Bioluminescent lichen and hardy shrubs",
+        fauna: "Small, insect-like creatures",
+        resources: "Rare minerals and crystals",
+        timeElapsed: "1h 0m",  // Initialize with non-zero time
+        year: "2174"
+    };
+}
+
+// Start the server
+app.listen(port, () => {
+    console.log(`Stranded Astronaut Multiplayer Server v2.3 with Resistance Feed Support running on port ${port}`);
+    console.log(`Server initialized with ${global.allFeedItems ? global.allFeedItems.length : 0} global feed items`);
+});
