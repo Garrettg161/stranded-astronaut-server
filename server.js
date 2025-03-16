@@ -5,6 +5,9 @@ const cors = require('cors');
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Global feed items storage
+global.allFeedItems = [];
+
 // Middleware
 app.use(cors());
 app.use(bodyParser.json());
@@ -119,7 +122,7 @@ app.post('/join', validateApiKey, (req, res) => {
         timeElapsed: "1h 0m",           // Initialize with non-zero time
         preserveClientState: true,       // Add flag to preserve client state during syncs
         plotQuestions: {},               // Initialize empty plot questions
-        feedItems: [],                   // Initialize empty feed items array
+        feedItems: global.allFeedItems.slice(),  // Use copies of the global feed items
         messages: []                     // Initialize empty messages array
     };
     
@@ -157,6 +160,18 @@ function joinExistingSession(sessionId, playerId, playerName, res) {
         id: playerId,
         sessionId: sessionId
     };
+    
+    // Ensure this session has all feed items from the global pool
+    if (!gameSessions[sessionId].feedItems) {
+        gameSessions[sessionId].feedItems = [];
+    }
+    
+    // Add any global feed items not already in this session
+    global.allFeedItems.forEach(item => {
+        if (!gameSessions[sessionId].feedItems.some(sessionItem => sessionItem.id === item.id)) {
+            gameSessions[sessionId].feedItems.push(item);
+        }
+    });
     
     // Return the session info
     res.json({
@@ -274,6 +289,40 @@ app.post('/message', validateApiKey, (req, res) => {
     // Limit message history
     if (gameSessions[sessionId].messages.length > 100) {
         gameSessions[sessionId].messages.shift();
+    }
+    
+    // Check if this is a feed item message and distribute it globally
+    if (content && content.startsWith('FEED_ITEM:')) {
+        try {
+            // Extract the feed item data
+            const jsonStart = content.indexOf('FEED_ITEM:') + 'FEED_ITEM:'.length;
+            const jsonString = content.substring(jsonStart);
+            const feedItem = JSON.parse(jsonString);
+            
+            console.log(`Received feed item via message: ${feedItem.title}`);
+            
+            // Add to global feed items if not already present
+            if (!global.allFeedItems.some(item => item.id === feedItem.id)) {
+                global.allFeedItems.push(feedItem);
+                console.log(`Added feed item to global pool: ${feedItem.id}`);
+            }
+            
+            // Add to all sessions
+            Object.values(gameSessions).forEach(session => {
+                // Initialize feed items array if needed
+                if (!session.feedItems) {
+                    session.feedItems = [];
+                }
+                
+                // Add if not already in this session
+                if (!session.feedItems.some(item => item.id === feedItem.id)) {
+                    session.feedItems.push(feedItem);
+                    console.log(`Added feed item to session ${session.id}: ${feedItem.id}`);
+                }
+            });
+        } catch (error) {
+            console.error('Error processing feed item message:', error);
+        }
     }
     
     res.json({ success: true });
@@ -459,7 +508,7 @@ app.post('/syncPlotState', validateApiKey, (req, res) => {
 
 // Sync game state
 app.post('/sync', validateApiKey, (req, res) => {
-    const { sessionId, playerId } = req.body;
+    const { sessionId, playerId, includeAllItems } = req.body;
     
     if (!gameSessions[sessionId]) {
         return res.status(404).json({ error: 'Session not found' });
@@ -489,6 +538,30 @@ app.post('/sync', validateApiKey, (req, res) => {
         p.currentLocation === currentLocation
     );
     
+    // Make sure to include ALL feed items from the global pool
+    let feedItemsToSend = global.allFeedItems || [];
+    
+    // Make sure the session has the latest feed items
+    if (!gameSessions[sessionId].feedItems) {
+        gameSessions[sessionId].feedItems = [];
+    }
+    
+    // Synchronize session feed items with global feed items
+    global.allFeedItems.forEach(item => {
+        if (!gameSessions[sessionId].feedItems.some(sessionItem => sessionItem.id === item.id)) {
+            gameSessions[sessionId].feedItems.push(item);
+        }
+    });
+    
+    // If requested, send the full global list, otherwise send the session's list
+    if (includeAllItems) {
+        feedItemsToSend = global.allFeedItems;
+        console.log(`Sending all ${feedItemsToSend.length} global feed items to client`);
+    } else {
+        feedItemsToSend = gameSessions[sessionId].feedItems;
+        console.log(`Sending ${feedItemsToSend.length} session feed items to client`);
+    }
+    
     // Prepare response data
     const responseData = {
         sessionId: sessionId,
@@ -503,7 +576,7 @@ app.post('/sync', validateApiKey, (req, res) => {
         timeElapsed: gameSessions[sessionId].timeElapsed || "1h 0m",
         preserveClientState: true,  // Always tell client to preserve its own state
         plotQuestions: gameSessions[sessionId].plotQuestions || {},  // Include plot questions in sync
-        feedItems: gameSessions[sessionId].feedItems || []  // Include feed items in sync
+        feedItems: feedItemsToSend  // Send feed items to client
     };
     
     res.json(responseData);
@@ -556,6 +629,11 @@ app.post('/feed', validateApiKey, (req, res) => {
         return res.status(404).json({ error: 'Session or player not found' });
     }
     
+    // Initialize global feed items array if it doesn't exist
+    if (!global.allFeedItems) {
+        global.allFeedItems = [];
+    }
+    
     // Initialize feed items array for this session if it doesn't exist
     if (!gameSessions[sessionId].feedItems) {
         gameSessions[sessionId].feedItems = [];
@@ -564,31 +642,55 @@ app.post('/feed', validateApiKey, (req, res) => {
     // Handle different actions
     switch (action) {
         case 'publish':
-            // Add the feed item to the session's feed items
+            // Add the feed item to both the global feed and the session's feed
             if (feedItem) {
+                console.log(`Publishing feed item: ${feedItem.title} [${feedItem.id}]`);
+                
+                // Add to global feed items
+                global.allFeedItems.push(feedItem);
+                
+                // Add to session feed items
                 gameSessions[sessionId].feedItems.push(feedItem);
                 
                 // Also create a message to notify all users
                 const messageContent = `FEED_ITEM:${JSON.stringify(feedItem)}`;
                 
-                // Create message object
-                const message = {
-                    id: uuidv4(),
-                    sessionId: sessionId,
-                    senderId: playerId,
-                    senderName: gameSessions[sessionId].players[playerId].name,
-                    targetId: null,
-                    content: messageContent,
-                    timestamp: new Date().getTime(),
-                    isSystemMessage: false
-                };
+                // Add to all active sessions for propagation
+                Object.keys(gameSessions).forEach(sessId => {
+                    const session = gameSessions[sessId];
+                    
+                    // Create message object for each session
+                    const message = {
+                        id: uuidv4(),
+                        sessionId: sessId,
+                        senderId: playerId,
+                        senderName: gameSessions[sessionId].players[playerId].name,
+                        targetId: null,
+                        content: messageContent,
+                        timestamp: new Date().getTime(),
+                        isSystemMessage: false
+                    };
+                    
+                    // Initialize messages array if needed
+                    if (!session.messages) {
+                        session.messages = [];
+                    }
+                    
+                    // Add message to session
+                    session.messages.push(message);
+                    
+                    // Add feed item to session's feed items
+                    if (!session.feedItems) {
+                        session.feedItems = [];
+                    }
+                    
+                    // Only add if not already present (by ID)
+                    if (!session.feedItems.some(item => item.id === feedItem.id)) {
+                        session.feedItems.push(feedItem);
+                    }
+                });
                 
-                // Add to messages
-                if (!gameSessions[sessionId].messages) {
-                    gameSessions[sessionId].messages = [];
-                }
-                gameSessions[sessionId].messages.push(message);
-                
+                console.log(`Feed item ${feedItem.id} published to all sessions`);
                 res.json({ success: true, feedItemId: feedItem.id });
             } else {
                 res.status(400).json({ error: 'Missing feed item data' });
@@ -596,25 +698,42 @@ app.post('/feed', validateApiKey, (req, res) => {
             break;
             
         case 'get':
-            // Return all feed items for this session
+            // Return all feed items from the global pool
+            console.log(`Returning ${global.allFeedItems.length} feed items`);
             res.json({ 
                 success: true, 
-                feedItems: gameSessions[sessionId].feedItems || []
+                feedItems: global.allFeedItems || []
             });
             break;
             
         case 'delete':
-            // Delete a feed item
+            // Delete logic remains similar but now removes from global array too
             if (feedItem && feedItem.id) {
-                // Find and remove from array
-                const index = gameSessions[sessionId].feedItems.findIndex(item => item.id === feedItem.id);
-                if (index !== -1) {
-                    gameSessions[sessionId].feedItems.splice(index, 1);
+                console.log(`Deleting feed item: ${feedItem.id}`);
+                
+                // Find and remove from global array
+                const globalIndex = global.allFeedItems.findIndex(item => item.id === feedItem.id);
+                if (globalIndex !== -1) {
+                    global.allFeedItems.splice(globalIndex, 1);
+                    console.log(`Removed item from global feed items`);
+                }
+                
+                // Remove from all sessions
+                Object.keys(gameSessions).forEach(sessId => {
+                    const session = gameSessions[sessId];
                     
-                    // Create delete notification message
+                    if (session.feedItems) {
+                        const index = session.feedItems.findIndex(item => item.id === feedItem.id);
+                        if (index !== -1) {
+                            session.feedItems.splice(index, 1);
+                            console.log(`Removed item from session ${sessId}`);
+                        }
+                    }
+                    
+                    // Add delete notification to each session
                     const deleteMessage = {
                         id: uuidv4(),
-                        sessionId: sessionId,
+                        sessionId: sessId,
                         senderId: playerId,
                         senderName: gameSessions[sessionId].players[playerId].name,
                         targetId: null,
@@ -623,13 +742,15 @@ app.post('/feed', validateApiKey, (req, res) => {
                         isSystemMessage: false
                     };
                     
-                    // Add to messages
-                    gameSessions[sessionId].messages.push(deleteMessage);
+                    if (!session.messages) {
+                        session.messages = [];
+                    }
                     
-                    res.json({ success: true });
-                } else {
-                    res.status(404).json({ error: 'Feed item not found' });
-                }
+                    session.messages.push(deleteMessage);
+                });
+                
+                console.log(`Feed item ${feedItem.id} deleted from all sessions`);
+                res.json({ success: true });
             } else {
                 res.status(400).json({ error: 'Missing feed item ID' });
             }
@@ -704,33 +825,4 @@ app.post('/checkPermissions', validateApiKey, (req, res) => {
         }
     }
     
-    res.json({
-        success: true,
-        permissions: {
-            canPost: canPost,
-            role: player.role,
-            organization: organization || "Resistance"
-        }
-    });
-});
-
-// Default game facts
-function getDefaultGameFacts() {
-    return {
-        planetName: "Zeta Proxima b",
-        atmosphere: "Thin, breathable with assistance",
-        gravity: "0.8 Earth gravity",
-        temperature: "Variable, generally cool",
-        terrain: "Rocky plains with scattered crystalline formations",
-        flora: "Bioluminescent lichen and hardy shrubs",
-        fauna: "Small, insect-like creatures",
-        resources: "Rare minerals and crystals",
-        timeElapsed: "1h 0m",  // Initialize with non-zero time
-        year: "2174"
-    };
-}
-
-// Start the server
-app.listen(port, () => {
-    console.log(`Stranded Astronaut Multiplayer Server v2.3 with Resistance Feed Support running on port ${port}`);
-});
+    res.
