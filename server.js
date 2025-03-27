@@ -7,6 +7,8 @@ const port = process.env.PORT || 3000;
 
 // Global feed items storage
 global.allFeedItems = [];
+// Global direct messages storage
+global.directMessages = {};
 
 // Middleware
 app.use(cors());
@@ -598,7 +600,15 @@ app.post('/sync', validateApiKey, (req, res) => {
         plotQuestions: gameSessions[sessionId].plotQuestions || {},  // Include plot questions in sync
         feedItems: feedItemsToSend || []  // Send feed items to client
     };
-    
+
+    // Check for unread direct messages
+    const hasUnreadMessages = global.directMessages &&
+        global.directMessages[playerId] &&
+        global.directMessages[playerId].some(msg => !msg.read);
+
+    // Add to responseData
+    responseData.hasUnreadDirectMessages = hasUnreadMessages;
+
     res.json(responseData);
 });
 
@@ -639,6 +649,143 @@ app.post('/organizations', validateApiKey, (req, res) => {
     ];
     
     res.json({ organizations });
+});
+
+// Direct Messaging endpoint
+app.post('/directMessages', validateApiKey, (req, res) => {
+    const { sessionId, playerId, action, messageId, message } = req.body;
+    
+    if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
+        return res.status(404).json({ error: 'Session or player not found' });
+    }
+    
+    // Initialize direct messages structure if needed
+    if (!global.directMessages) {
+        global.directMessages = {};
+    }
+    
+    // Handle different actions
+    switch (action) {
+        case 'send':
+            if (message && message.recipients && message.recipients.length > 0) {
+                console.log(`Sending direct message to ${message.recipients.length} recipients`);
+                
+                // Create a direct message object
+                const directMessage = {
+                    id: uuidv4(),
+                    sender: {
+                        id: playerId,
+                        name: gameSessions[sessionId].players[playerId].name || 'Unknown',
+                        organization: message.organization || 'Resistance'
+                    },
+                    title: message.title || 'No Subject',
+                    content: message.content || '',
+                    contentType: message.contentType || 'text',
+                    timestamp: new Date().toISOString(),
+                    read: false
+                };
+                
+                // Store for each recipient
+                message.recipients.forEach(recipientId => {
+                    // Initialize recipient's inbox if needed
+                    if (!global.directMessages[recipientId]) {
+                        global.directMessages[recipientId] = [];
+                    }
+                    
+                    // Add message to recipient's inbox
+                    global.directMessages[recipientId].push(directMessage);
+                    
+                    console.log(`Direct message stored for recipient: ${recipientId}`);
+                    
+                    // Notify recipient if online
+                    Object.values(gameSessions).forEach(session => {
+                        if (session.players[recipientId]) {
+                            // Create notification
+                            const notification = {
+                                id: uuidv4(),
+                                sessionId: session.id,
+                                senderId: "system",
+                                senderName: "System",
+                                targetId: recipientId,
+                                content: `NEW_DIRECT_MESSAGE:${JSON.stringify({
+                                    id: directMessage.id,
+                                    sender: directMessage.sender.name,
+                                    title: directMessage.title
+                                })}`,
+                                timestamp: new Date().getTime(),
+                                isSystemMessage: true
+                            };
+                            
+                            // Add to session messages
+                            if (!session.messages) {
+                                session.messages = [];
+                            }
+                            session.messages.push(notification);
+                        }
+                    });
+                });
+                
+                res.json({ success: true, messageId: directMessage.id });
+            } else {
+                res.status(400).json({ error: 'Missing message data or recipients' });
+            }
+            break;
+            
+        case 'get':
+            // Return all direct messages for the user
+            console.log(`Retrieving direct messages for player: ${playerId}`);
+            
+            if (!global.directMessages[playerId]) {
+                global.directMessages[playerId] = [];
+            }
+            
+            res.json({
+                success: true,
+                messages: global.directMessages[playerId] || []
+            });
+            break;
+            
+        case 'markAsRead':
+            // Mark a message as read
+            if (messageId) {
+                console.log(`Marking message as read: ${messageId}`);
+                
+                if (global.directMessages[playerId]) {
+                    const messageIndex = global.directMessages[playerId].findIndex(msg => msg.id === messageId);
+                    
+                    if (messageIndex !== -1) {
+                        global.directMessages[playerId][messageIndex].read = true;
+                        console.log(`Message marked as read`);
+                    }
+                }
+                
+                res.json({ success: true });
+            } else {
+                res.status(400).json({ error: 'Missing message ID' });
+            }
+            break;
+            
+        case 'delete':
+            // Delete a message
+            if (messageId) {
+                console.log(`Deleting message: ${messageId}`);
+                
+                if (global.directMessages[playerId]) {
+                    global.directMessages[playerId] = global.directMessages[playerId].filter(
+                        msg => msg.id !== messageId
+                    );
+                    console.log(`Message deleted`);
+                }
+                
+                res.json({ success: true });
+            } else {
+                res.status(400).json({ error: 'Missing message ID' });
+            }
+            break;
+            
+        default:
+            res.status(400).json({ error: 'Unknown action' });
+    }
 });
 
 // Feed operations endpoint
@@ -734,6 +881,77 @@ app.post('/feed', validateApiKey, (req, res) => {
                 success: true, 
                 feedItems: global.allFeedItems || []
             });
+            break;
+            
+        case 'directMessage':
+            // Process a direct message - sent to specific users only
+            if (feedItem && feedItem.recipients && feedItem.recipients.length > 0) {
+                console.log(`Sending direct message: ${feedItem.title} [${feedItem.id}] to ${feedItem.recipients.length} recipients`);
+                
+                // Create a copy with a new ID to avoid cross-referencing issues
+                const directMessageItem = {
+                    ...feedItem,
+                    id: uuidv4(), // Generate a new unique ID for this message
+                    type: 'directMessage',
+                    sender: {
+                        id: playerId,
+                        name: gameSessions[sessionId].players[playerId].name || 'Unknown',
+                        organization: feedItem.organization || 'Unknown'
+                    },
+                    timestamp: new Date().toISOString()
+                };
+                
+                // Initialize direct messages structure if needed
+                if (!global.directMessages) {
+                    global.directMessages = {};
+                }
+                
+                // Store the message for each recipient
+                feedItem.recipients.forEach(recipientId => {
+                    // Initialize recipient's message array if needed
+                    if (!global.directMessages[recipientId]) {
+                        global.directMessages[recipientId] = [];
+                    }
+                    
+                    // Add message to recipient's inbox
+                    global.directMessages[recipientId].push(directMessageItem);
+                    
+                    console.log(`Direct message stored for recipient: ${recipientId}`);
+                    
+                    // If recipient is online in any session, create a system notification
+                    Object.values(gameSessions).forEach(session => {
+                        if (session.players[recipientId]) {
+                            // Create notification message for the recipient
+                            const notification = {
+                                id: uuidv4(),
+                                sessionId: session.id,
+                                senderId: "system",
+                                senderName: "System",
+                                targetId: recipientId,
+                                content: `NEW_DIRECT_MESSAGE:${JSON.stringify({
+                                    id: directMessageItem.id,
+                                    sender: directMessageItem.sender.name,
+                                    title: directMessageItem.title
+                                })}`,
+                                timestamp: new Date().getTime(),
+                                isSystemMessage: true
+                            };
+                            
+                            // Add to session messages
+                            if (!session.messages) {
+                                session.messages = [];
+                            }
+                            session.messages.push(notification);
+                            
+                            console.log(`Notification sent to recipient ${recipientId} in session ${session.id}`);
+                        }
+                    });
+                });
+                
+                res.json({ success: true, messageId: directMessageItem.id });
+            } else {
+                res.status(400).json({ error: 'Missing feed item data or recipients' });
+            }
             break;
             
         case 'delete':
