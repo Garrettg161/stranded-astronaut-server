@@ -978,75 +978,74 @@ app.post('/feed', validateApiKey, (req, res) => {
             break;
             
         case 'directMessage':
-            // Process a direct message - sent to specific users only
-            if (feedItem && feedItem.recipients && feedItem.recipients.length > 0) {
-                console.log(`Sending direct message: ${feedItem.title} [${feedItem.id}] to ${feedItem.recipients.length} recipients`);
+          // Process a direct message - sent to specific users only
+          if (feedItem && feedItem.recipients && feedItem.recipients.length > 0) {
+            console.log(`Sending direct message: ${feedItem.title} [${feedItem.id}] to ${feedItem.recipients.length} recipients`);
+            
+            // Create a copy with a new ID to avoid cross-referencing issues
+            const directMessageItem = {
+              ...feedItem,
+              id: uuidv4(), // Generate a new unique ID for this message
+              type: 'directMessage',
+              sender: {
+                id: playerId,
+                name: gameSessions[sessionId].players[playerId].name || 'Unknown',
+                organization: feedItem.organization || 'Unknown'
+              },
+              timestamp: new Date().toISOString()
+            };
+            
+            // Initialize direct messages structure if needed
+            if (!global.directMessages) {
+              global.directMessages = {};
+            }
+            
+            // Store the message for each recipient
+            feedItem.recipients.forEach(recipientName => {
+              // Try to find the recipient's ID using the mapping
+              const recipientId = getUserIdByUsername(recipientName);
+              
+              if (recipientId) {
+                // Recipient ID is known - deliver directly
+                console.log(`Found ID for recipient ${recipientName}: ${recipientId}`);
                 
-                // Create a copy with a new ID to avoid cross-referencing issues
-                const directMessageItem = {
-                    ...feedItem,
-                    id: uuidv4(), // Generate a new unique ID for this message
-                    type: 'directMessage',
-                    sender: {
-                        id: playerId,
-                        name: gameSessions[sessionId].players[playerId].name || 'Unknown',
-                        organization: feedItem.organization || 'Unknown'
-                    },
-                    timestamp: new Date().toISOString()
-                };
-                
-                // Initialize direct messages structure if needed
-                if (!global.directMessages) {
-                    global.directMessages = {};
+                // Initialize recipient's inbox if needed
+                if (!global.directMessages[recipientId]) {
+                  global.directMessages[recipientId] = [];
                 }
                 
-                // Store the message for each recipient
-                feedItem.recipients.forEach(recipientId => {
-                    // Initialize recipient's message array if needed
-                    if (!global.directMessages[recipientId]) {
-                        global.directMessages[recipientId] = [];
-                    }
-                    
-                    // Add message to recipient's inbox
-                    global.directMessages[recipientId].push(directMessageItem);
-                    
-                    console.log(`Direct message stored for recipient: ${recipientId}`);
-                    
-                    // If recipient is online in any session, create a system notification
-                    Object.values(gameSessions).forEach(session => {
-                        if (session.players[recipientId]) {
-                            // Create notification message for the recipient
-                            const notification = {
-                                id: uuidv4(),
-                                sessionId: session.id,
-                                senderId: "system",
-                                senderName: "System",
-                                targetId: recipientId,
-                                content: `NEW_DIRECT_MESSAGE:${JSON.stringify({
-                                    id: directMessageItem.id,
-                                    sender: directMessageItem.sender.name,
-                                    title: directMessageItem.title
-                                })}`,
-                                timestamp: new Date().getTime(),
-                                isSystemMessage: true
-                            };
-                            
-                            // Add to session messages
-                            if (!session.messages) {
-                                session.messages = [];
-                            }
-                            session.messages.push(notification);
-                            
-                            console.log(`Notification sent to recipient ${recipientId} in session ${session.id}`);
-                        }
-                    });
-                });
+                // Add message to recipient's inbox
+                global.directMessages[recipientId].push(directMessageItem);
+                console.log(`Direct message stored for recipient: ${recipientId}`);
                 
-                res.json({ success: true, messageId: directMessageItem.id });
-            } else {
-                res.status(400).json({ error: 'Missing feed item data or recipients' });
-            }
-            break;
+                // Notify recipient if online
+                notifyRecipientIfOnline(recipientId, directMessageItem);
+              } else {
+                // Recipient ID unknown - store as pending
+                const normalizedName = recipientName.toLowerCase();
+                console.log(`Recipient ID unknown for ${recipientName} - storing as pending`);
+                
+                // Initialize pending messages if needed
+                if (!global.pendingDirectMessages) {
+                  global.pendingDirectMessages = {};
+                }
+                
+                // Initialize pending messages array if needed
+                if (!global.pendingDirectMessages[normalizedName]) {
+                  global.pendingDirectMessages[normalizedName] = [];
+                }
+                
+                // Store as pending
+                global.pendingDirectMessages[normalizedName].push(directMessageItem);
+                console.log(`Message stored as pending for ${recipientName}`);
+              }
+            });
+            
+            res.json({ success: true, messageId: directMessageItem.id });
+          } else {
+            res.status(400).json({ error: 'Missing feed item data or recipients' });
+          }
+          break;
             
         case 'delete':
             // Delete logic remains similar but now removes from global array too
