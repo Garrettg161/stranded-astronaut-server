@@ -52,13 +52,64 @@ app.post('/ping', validateApiKey, (req, res) => {
 });
 
 // Create or join a session
+// Create or join a session
 app.post('/join', validateApiKey, (req, res) => {
     console.log('Join request received with body:', req.body);
     
-    const { sessionId, playerName, sessionName } = req.body;
+    const { sessionId, playerName, sessionName, appName } = req.body;
     
     // Generate a player ID
     const playerId = uuidv4();
+    
+    // Special case for dWorld app - always use a single shared session
+    if (appName === "dWorld") {
+        const DWORLD_SESSION_ID = "dworld-global-session";
+        
+        // Create the session if it doesn't exist yet
+        if (!gameSessions[DWORLD_SESSION_ID]) {
+            console.log(`Creating dedicated dWorld session: ${DWORLD_SESSION_ID}`);
+            
+            gameSessions[DWORLD_SESSION_ID] = {
+                id: DWORLD_SESSION_ID,
+                createdAt: new Date(),
+                players: {},
+                gameFacts: getDefaultGameFacts(),
+                sessionName: "dWorld Global Session",
+                globalTurn: 0,
+                timeElapsed: "1h 0m",
+                preserveClientState: true,
+                plotQuestions: {},
+                feedItems: [],
+                messages: []
+            };
+            
+            // Add any global feed items to this session
+            if (global.allFeedItems && global.allFeedItems.length > 0) {
+                gameSessions[DWORLD_SESSION_ID].feedItems = [...global.allFeedItems];
+            }
+        }
+        
+        // Add the player to the dWorld session
+        const player = createPlayer(playerId, playerName);
+        gameSessions[DWORLD_SESSION_ID].players[playerId] = player;
+        players[playerId] = {
+            id: playerId,
+            sessionId: DWORLD_SESSION_ID
+        };
+        
+        // Register username mapping
+        updateUsernameMapping(playerName, playerId);
+        
+        // Return the session info
+        return res.json({
+            sessionId: DWORLD_SESSION_ID,
+            sessionName: "dWorld Global Session",
+            shortCode: "DWORLD",
+            player: player,
+            globalTurn: gameSessions[DWORLD_SESSION_ID].globalTurn || 0,
+            timeElapsed: gameSessions[DWORLD_SESSION_ID].timeElapsed || "1h 0m"
+        });
+    }
     
     // If sessionId is provided, try to join an existing session
     if (sessionId) {
