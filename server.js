@@ -1102,6 +1102,28 @@ app.post('/feed', validateApiKey, (req, res) => {
     }
 });
 
+// Get players in a session
+app.get('/players', validateApiKey, (req, res) => {
+    const { sessionId } = req.query;
+    
+    if (!sessionId || !gameSessions[sessionId]) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
+    
+    // Extract players from the session
+    const playersArray = Object.values(gameSessions[sessionId].players).map(player => ({
+        id: player.id,
+        name: player.name,
+        isActive: true
+    }));
+    
+    // Return the player list
+    res.json({
+        success: true,
+        players: playersArray
+    });
+});
+
 // User profile updates
 app.post('/updateProfile', validateApiKey, (req, res) => {
     const { sessionId, playerId, userProfile } = req.body;
