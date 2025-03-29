@@ -9,6 +9,10 @@ const port = process.env.PORT || 3000;
 global.allFeedItems = [];
 // Global direct messages storage
 global.directMessages = {};
+// Global username to userId mapping
+global.usernameMappings = {};
+// Global pending direct messages storage
+global.pendingDirectMessages = {};
 
 // Middleware
 app.use(cors());
@@ -110,10 +114,10 @@ app.post('/join', validateApiKey, (req, res) => {
     // Create a new session
     const newSessionId = uuidv4();
     console.log(`Creating new session with ID: ${newSessionId}, shortId: ${newSessionId.substring(0, 6).toUpperCase()}`);
-    
+
     // Initialize the game session with the provided session name or a default
     const actualSessionName = sessionName || `Game-${newSessionId.substring(0, 6)}`;
-    
+
     gameSessions[newSessionId] = {
         id: newSessionId,
         createdAt: new Date(),
@@ -127,13 +131,13 @@ app.post('/join', validateApiKey, (req, res) => {
         feedItems: [],                   // Initialize empty feed items array
         messages: []                     // Initialize empty messages array
     };
-    
+
     // Add any global feed items to this new session
     if (global.allFeedItems && global.allFeedItems.length > 0) {
         gameSessions[newSessionId].feedItems = [...global.allFeedItems];
         console.log(`Added ${global.allFeedItems.length} global feed items to new session`);
     }
-    
+
     // Add the player to the session
     const player = createPlayer(playerId, playerName);
     gameSessions[newSessionId].players[playerId] = player;
@@ -141,7 +145,10 @@ app.post('/join', validateApiKey, (req, res) => {
         id: playerId,
         sessionId: newSessionId
     };
-    
+
+    // Register username mapping
+    updateUsernameMapping(playerName, playerId);
+
     // Return the session info
     res.json({
         sessionId: newSessionId,
@@ -168,6 +175,9 @@ function joinExistingSession(sessionId, playerId, playerName, res) {
         id: playerId,
         sessionId: sessionId
     };
+    
+    // Register username mapping
+    updateUsernameMapping(playerName, playerId);
     
     // Ensure this session has all feed items from the global pool
     if (!gameSessions[sessionId].feedItems) {
@@ -266,6 +276,90 @@ app.post('/lookup', validateApiKey, (req, res) => {
         }))
     });
 });
+
+// Helper function to register/update a username mapping
+function updateUsernameMapping(username, userId) {
+  if (!username || !userId) return;
+  
+  // Normalize username to handle case sensitivity
+  const normalizedName = username.toLowerCase();
+  
+  // Update or create the mapping
+  global.usernameMappings[normalizedName] = userId;
+  console.log(`Username mapping updated: ${normalizedName} -> ${userId}`);
+  
+  // Check if this user has pending messages
+  checkAndDeliverPendingMessages(username, userId);
+}
+
+// Helper to look up a userId by username
+function getUserIdByUsername(username) {
+  if (!username) return null;
+  
+  const normalizedName = username.toLowerCase();
+  return global.usernameMappings[normalizedName] || null;
+}
+
+// Helper to deliver any pending messages
+function checkAndDeliverPendingMessages(username, userId) {
+  // Skip if no mapping exists
+  if (!global.pendingDirectMessages) return;
+  
+  // Check if there are pending messages for this username
+  const normalizedName = username.toLowerCase();
+  if (global.pendingDirectMessages[normalizedName]) {
+    console.log(`Found ${global.pendingDirectMessages[normalizedName].length} pending messages for ${username}`);
+    
+    // Initialize user's inbox if needed
+    if (!global.directMessages) {
+      global.directMessages = {};
+    }
+    
+    if (!global.directMessages[userId]) {
+      global.directMessages[userId] = [];
+    }
+    
+    // Move all pending messages to the user's inbox
+    global.pendingDirectMessages[normalizedName].forEach(message => {
+      global.directMessages[userId].push(message);
+      console.log(`Delivered pending message to ${username} (${userId}): ${message.title}`);
+    });
+    
+    // Clear pending messages
+    delete global.pendingDirectMessages[normalizedName];
+  }
+}
+
+// Helper to notify a recipient if they're online
+function notifyRecipientIfOnline(recipientId, directMessage) {
+  // Check all sessions for the recipient
+  Object.values(gameSessions).forEach(session => {
+    if (session.players[recipientId]) {
+      // Create notification
+      const notification = {
+        id: uuidv4(),
+        sessionId: session.id,
+        senderId: "system",
+        senderName: "System",
+        targetId: recipientId,
+        content: `NEW_DIRECT_MESSAGE:${JSON.stringify({
+          id: directMessage.id,
+          sender: directMessage.sender.name,
+          title: directMessage.title
+        })}`,
+        timestamp: new Date().getTime(),
+        isSystemMessage: true
+      };
+      
+      // Add to session messages
+      if (!session.messages) {
+        session.messages = [];
+      }
+      session.messages.push(notification);
+      console.log(`Notification sent to recipient ${recipientId} in session ${session.id}`);
+    }
+  });
+}
 
 // Send a message
 app.post('/message', validateApiKey, (req, res) => {
