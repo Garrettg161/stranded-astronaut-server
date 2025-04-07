@@ -1097,6 +1097,191 @@ app.post('/feed', validateApiKey, (req, res) => {
             res.status(400).json({ error: 'Missing feed item data or recipients' });
           }
           break;
+        
+            // Add this new case to the switch statement in the feed endpoint handler in server.js
+            // inside the app.post('/feed', validateApiKey, (req, res) => { ... }) function
+
+            case 'update':
+                // This handles updating an existing feed item (edit functionality)
+                if (feedItem && feedItem.id) {
+                    console.log(`Updating feed item: ${feedItem.title} [${feedItem.id}]`);
+                    
+                    // Find and update in global array
+                    const globalIndex = global.allFeedItems.findIndex(item => item.id === feedItem.id);
+                    if (globalIndex !== -1) {
+                        // Update the item in the global pool
+                        global.allFeedItems[globalIndex] = feedItem;
+                        console.log(`Updated item in global feed items pool`);
+                    } else {
+                        // If not found, add it as new
+                        global.allFeedItems.push(feedItem);
+                        console.log(`Item not found in global pool, adding as new`);
+                    }
+                    
+                    // Update in all sessions
+                    Object.keys(gameSessions).forEach(sessId => {
+                        const session = gameSessions[sessId];
+                        
+                        if (!session.feedItems) {
+                            session.feedItems = [];
+                        }
+                        
+                        // Find the item in this session
+                        const sessionIndex = session.feedItems.findIndex(item => item.id === feedItem.id);
+                        if (sessionIndex !== -1) {
+                            // Update the item
+                            session.feedItems[sessionIndex] = feedItem;
+                            console.log(`Updated item in session ${sessId}`);
+                        } else {
+                            // If not found, add it as new to this session
+                            session.feedItems.push(feedItem);
+                            console.log(`Item not found in session ${sessId}, adding`);
+                        }
+                        
+                        // Create an update notification for each session
+                        const updateMessage = {
+                            id: uuidv4(),
+                            sessionId: sessId,
+                            senderId: playerId,
+                            senderName: gameSessions[sessionId].players[playerId].name,
+                            targetId: null,
+                            content: `UPDATE_FEED_ITEM:${JSON.stringify(feedItem)}`,
+                            timestamp: new Date().getTime(),
+                            isSystemMessage: false
+                        };
+                        
+                        // Initialize messages array if needed
+                        if (!session.messages) {
+                            session.messages = [];
+                        }
+                        
+                        // Add message to session
+                        session.messages.push(updateMessage);
+                    });
+                    
+                    // Special handling for direct messages updates
+                    if (feedItem.isDirectMessage && feedItem.recipients && feedItem.recipients.length > 0) {
+                        console.log(`Updated direct message needs to be redistributed to recipients`);
+                        
+                        // For direct messages, we need to update in recipients' inboxes
+                        feedItem.recipients.forEach(recipientName => {
+                            const recipientId = getUserIdByUsername(recipientName);
+                            
+                            if (recipientId) {
+                                // Make sure recipient has an inbox
+                                if (!global.directMessages[recipientId]) {
+                                    global.directMessages[recipientId] = [];
+                                }
+                                
+                                // Check if this message is already in their inbox
+                                const messageIndex = global.directMessages[recipientId].findIndex(msg =>
+                                    msg.id === feedItem.id ||
+                                    (msg.originalId && msg.originalId === feedItem.id)
+                                );
+                                
+                                if (messageIndex !== -1) {
+                                    // Update existing message
+                                    console.log(`Updating existing message in ${recipientName}'s inbox`);
+                                    global.directMessages[recipientId][messageIndex] = {
+                                        id: global.directMessages[recipientId][messageIndex].id, // Keep original ID
+                                        originalId: feedItem.id, // Store original ID for reference
+                                        sender: {
+                                            id: playerId,
+                                            name: gameSessions[sessionId].players[playerId].name || 'Unknown',
+                                            organization: feedItem.organization || 'Unknown'
+                                        },
+                                        title: feedItem.title || 'No Subject',
+                                        content: feedItem.content || '',
+                                        contentType: feedItem.type || 'text',
+                                        timestamp: new Date().toISOString(),
+                                        read: false // Mark as unread since it was updated
+                                    };
+                                    
+                                    // Send notification of update
+                                    notifyRecipientIfOnline(recipientId, global.directMessages[recipientId][messageIndex]);
+                                } else {
+                                    // Add as new message
+                                    console.log(`Adding updated message as new to ${recipientName}'s inbox`);
+                                    const directMessage = {
+                                        id: uuidv4(),
+                                        originalId: feedItem.id, // Store original ID for reference
+                                        sender: {
+                                            id: playerId,
+                                            name: gameSessions[sessionId].players[playerId].name || 'Unknown',
+                                            organization: feedItem.organization || 'Unknown'
+                                        },
+                                        title: feedItem.title || 'No Subject',
+                                        content: feedItem.content || '',
+                                        contentType: feedItem.type || 'text',
+                                        timestamp: new Date().toISOString(),
+                                        read: false
+                                    };
+                                    
+                                    global.directMessages[recipientId].push(directMessage);
+                                    notifyRecipientIfOnline(recipientId, directMessage);
+                                }
+                            } else {
+                                // Handle unknown recipients just like in the direct message case
+                                const normalizedName = recipientName.toLowerCase();
+                                console.log(`Recipient ID unknown for ${recipientName} - storing updated message as pending`);
+                                
+                                if (!global.pendingDirectMessages) {
+                                    global.pendingDirectMessages = {};
+                                }
+                                
+                                if (!global.pendingDirectMessages[normalizedName]) {
+                                    global.pendingDirectMessages[normalizedName] = [];
+                                }
+                                
+                                // Check if we already have a pending message with this ID
+                                const pendingIndex = global.pendingDirectMessages[normalizedName].findIndex(msg =>
+                                    msg.id === feedItem.id ||
+                                    (msg.originalId && msg.originalId === feedItem.id)
+                                );
+                                
+                                if (pendingIndex !== -1) {
+                                    // Update existing pending message
+                                    global.pendingDirectMessages[normalizedName][pendingIndex] = {
+                                        id: global.pendingDirectMessages[normalizedName][pendingIndex].id,
+                                        originalId: feedItem.id,
+                                        sender: {
+                                            id: playerId,
+                                            name: gameSessions[sessionId].players[playerId].name || 'Unknown',
+                                            organization: feedItem.organization || 'Unknown'
+                                        },
+                                        title: feedItem.title || 'No Subject',
+                                        content: feedItem.content || '',
+                                        contentType: feedItem.type || 'text',
+                                        timestamp: new Date().toISOString(),
+                                        read: false
+                                    };
+                                } else {
+                                    // Add as new pending message
+                                    global.pendingDirectMessages[normalizedName].push({
+                                        id: uuidv4(),
+                                        originalId: feedItem.id,
+                                        sender: {
+                                            id: playerId,
+                                            name: gameSessions[sessionId].players[playerId].name || 'Unknown',
+                                            organization: feedItem.organization || 'Unknown'
+                                        },
+                                        title: feedItem.title || 'No Subject',
+                                        content: feedItem.content || '',
+                                        contentType: feedItem.type || 'text',
+                                        timestamp: new Date().toISOString(),
+                                        read: false
+                                    });
+                                }
+                            }
+                        });
+                    }
+                    
+                    console.log(`Feed item ${feedItem.id} updated in all sessions/inboxes`);
+                    res.json({ success: true, feedItemId: feedItem.id });
+                } else {
+                    res.status(400).json({ error: 'Missing feed item data or ID' });
+                }
+                break;
             
         case 'delete':
             // Delete logic remains similar but now removes from global array too
