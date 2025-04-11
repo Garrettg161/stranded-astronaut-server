@@ -1116,8 +1116,21 @@ app.post('/feed', validateApiKey, (req, res) => {
             if (feedItem) {
                 console.log(`Publishing feed item: ${feedItem.title} [${feedItem.id}]`);
                 
-                // Process media content if present
-                let processedItem = processMediaContent(feedItem);
+                // Process the feed item - but make it safer
+                let processedItem;
+                try {
+                    // Only process media if needed
+                    if (feedItem.type === 'image' || feedItem.type === 'video' || feedItem.type === 'audio') {
+                        processedItem = processMediaContent(feedItem);
+                    } else {
+                        // For text and other non-media items, use as-is
+                        processedItem = feedItem;
+                    }
+                } catch (error) {
+                    console.error("Error processing media:", error);
+                    // Fall back to the original item if processing fails
+                    processedItem = feedItem;
+                }
                 
                 // Add to global feed items if not already there
                 const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
