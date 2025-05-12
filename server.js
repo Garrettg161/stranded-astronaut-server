@@ -1093,7 +1093,7 @@ app.post('/directMessages', validateApiKey, (req, res) => {
 
 // Feed operations endpoint
 app.post('/feed', validateApiKey, (req, res) => {
-    const { sessionId, playerId, action, feedItem } = req.body;
+    const { sessionId, playerId, action, feedItem, feedItemId } = req.body;
     
     if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
         return res.status(404).json({ error: 'Session or player not found' });
@@ -1130,6 +1130,26 @@ app.post('/feed', validateApiKey, (req, res) => {
                     console.error("Error processing media:", error);
                     // Fall back to the original item if processing fails
                     processedItem = feedItem;
+                }
+                
+                // Check if this is a comment (has a parentId) and update the parent's comment count
+                if (processedItem.parentId) {
+                    console.log(`Item is a comment with parentId: ${processedItem.parentId}`);
+                    
+                    // Find the parent item in the global feed
+                    const parentGlobalIndex = global.allFeedItems.findIndex(item =>
+                        item.id === processedItem.parentId
+                    );
+                    
+                    if (parentGlobalIndex !== -1) {
+                        // Increment the comment count on the parent
+                        if (!global.allFeedItems[parentGlobalIndex].commentCount) {
+                            global.allFeedItems[parentGlobalIndex].commentCount = 0;
+                        }
+                        global.allFeedItems[parentGlobalIndex].commentCount += 1;
+                        
+                        console.log(`Updated parent item comment count to ${global.allFeedItems[parentGlobalIndex].commentCount}`);
+                    }
                 }
                 
                 // Add to global feed items if not already there
@@ -1184,12 +1204,57 @@ app.post('/feed', validateApiKey, (req, res) => {
                         session.feedItems.push(processedItem);
                         console.log(`Propagated feed item to session: ${sessId}`);
                     }
+                    
+                    // If this is a comment, ensure parent item is updated in this session too
+                    if (processedItem.parentId) {
+                        const parentSessionIndex = session.feedItems.findIndex(item =>
+                            item.id === processedItem.parentId
+                        );
+                        
+                        if (parentSessionIndex !== -1) {
+                            // Ensure comment count field exists
+                            if (!session.feedItems[parentSessionIndex].commentCount) {
+                                session.feedItems[parentSessionIndex].commentCount = 0;
+                            }
+                            
+                            // Update to match global count
+                            const parentGlobalIndex = global.allFeedItems.findIndex(item =>
+                                item.id === processedItem.parentId
+                            );
+                            
+                            if (parentGlobalIndex !== -1) {
+                                session.feedItems[parentSessionIndex].commentCount =
+                                    global.allFeedItems[parentGlobalIndex].commentCount;
+                            }
+                        }
+                    }
                 });
                 
                 console.log(`Feed item ${processedItem.id} published to all sessions`);
                 res.json({ success: true, feedItemId: processedItem.id });
             } else {
                 res.status(400).json({ error: 'Missing feed item data' });
+            }
+            break;
+            
+        case 'getComments':
+            // Get comments for a specific feed item
+            if (feedItemId) {
+                console.log(`Getting comments for feed item: ${feedItemId}`);
+                
+                // Find all comments with matching parentId
+                const comments = global.allFeedItems.filter(item =>
+                    item.parentId === feedItemId
+                );
+                
+                console.log(`Found ${comments.length} comments for item ${feedItemId}`);
+                
+                res.json({
+                    success: true,
+                    comments: comments
+                });
+            } else {
+                res.status(400).json({ error: 'Missing feed item ID' });
             }
             break;
             
