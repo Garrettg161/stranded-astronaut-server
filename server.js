@@ -1276,44 +1276,59 @@ app.post('/feed', validateApiKey, (req, res) => {
             }
             break;
             
-        case 'get':
-            // Calculate comment counts for all items before returning
-            console.log(`DEBUG-COMMENT-SERVER: Calculating comment counts for all ${global.allFeedItems.length} items`);
-            
-            const itemsWithCommentCounts = global.allFeedItems.map(item => {
-                // Make a copy to avoid modifying the original
-                const enrichedItem = {...item};
-                const itemId = typeof item.id === 'string' ? item.id : String(item.id);
+            // Find the 'get' case in the switch statement of the /feed endpoint
+            case 'get':
+                console.log("DEBUG-SERVER: Handling 'get' feed request");
                 
-                // Count comments for this item
-                const commentCount = global.allFeedItems.filter(potentialComment => {
-                    if (!potentialComment.parentId) return false;
+                // Log what's in the global feed
+                console.log(`DEBUG-SERVER: global.allFeedItems has ${global.allFeedItems.length} items total`);
+
+                // CRITICAL FIX: Return each item exactly once, with no duplicates
+                const uniqueItems = [];
+                const seenIds = new Set();
+                
+                // Process each item to include comment counts and ensure uniqueness
+                for (const item of global.allFeedItems) {
+                    const itemId = typeof item.id === 'string' ? item.id : String(item.id);
                     
-                    const parentId = typeof potentialComment.parentId === 'string' ?
-                        potentialComment.parentId : String(potentialComment.parentId);
-                    
-                    const isMatch = parentId === itemId;
-                    if (isMatch) {
-                        console.log(`DEBUG-COMMENT-SERVER: Found comment for item ${itemId}`);
+                    // Skip if we've already included this item
+                    if (seenIds.has(itemId)) {
+                        console.log(`DEBUG-SERVER: Skipping duplicate item ${itemId}`);
+                        continue;
                     }
-                    return isMatch;
-                }).length;
-                
-                // Set commentCount if there are comments
-                if (commentCount > 0) {
-                    enrichedItem.commentCount = commentCount;
-                    console.log(`DEBUG-COMMENT-SERVER: Item ${itemId} has ${commentCount} comments`);
+                    
+                    // Mark this item as seen
+                    seenIds.add(itemId);
+                    
+                    // Make a copy of the item
+                    const processedItem = {...item};
+                    
+                    // Calculate comment count
+                    const comments = global.allFeedItems.filter(potential => {
+                        if (!potential.parentId) return false;
+                        
+                        const parentId = typeof potential.parentId === 'string' ?
+                            potential.parentId : String(potential.parentId);
+                        
+                        return parentId === itemId;
+                    });
+                    
+                    // Add comment count if there are comments
+                    if (comments.length > 0) {
+                        processedItem.commentCount = comments.length;
+                        console.log(`DEBUG-SERVER: Item ${itemId} has ${comments.length} comments`);
+                    }
+                    
+                    // Add to unique items list
+                    uniqueItems.push(processedItem);
                 }
                 
-                return enrichedItem;
-            });
-            
-            console.log(`Returning ${itemsWithCommentCounts.length} feed items`);
-            res.json({
-                success: true,
-                feedItems: itemsWithCommentCounts || []
-            });
-            break;
+                console.log(`DEBUG-SERVER: Returning ${uniqueItems.length} unique feed items`);
+                res.json({
+                    success: true,
+                    feedItems: uniqueItems
+                });
+                break;
             
         case 'update':
             // This handles updating an existing feed item (edit functionality)
