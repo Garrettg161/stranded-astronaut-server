@@ -1092,9 +1092,8 @@ app.post('/directMessages', validateApiKey, (req, res) => {
 });
 
 // Feed operations endpoint
-// Feed operations endpoint
 app.post('/feed', validateApiKey, (req, res) => {
-    const { sessionId, playerId, action, feedItem, feedItemId } = req.body;
+    const { sessionId, playerId, action, feedItem, feedItemId, commentCount } = req.body;
     
     if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
         return res.status(404).json({ error: 'Session or player not found' });
@@ -1141,7 +1140,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                         : String(feedItem.parentId);
                     
                     processedItem.parentId = parentIdString;
-                    console.log(`Item is a comment with parentId: ${parentIdString}`);
+                    console.log(`DEBUG-COMMENT-SERVER: Item is a comment with parentId: ${parentIdString}`);
                     
                     // Find the parent item in the global feed using string comparison
                     const parentGlobalIndex = global.allFeedItems.findIndex(item => {
@@ -1156,9 +1155,9 @@ app.post('/feed', validateApiKey, (req, res) => {
                         }
                         global.allFeedItems[parentGlobalIndex].commentCount += 1;
                         
-                        console.log(`Updated parent item comment count to ${global.allFeedItems[parentGlobalIndex].commentCount}`);
+                        console.log(`DEBUG-COMMENT-SERVER: Updated parent item comment count to ${global.allFeedItems[parentGlobalIndex].commentCount}`);
                     } else {
-                        console.log(`Warning: Could not find parent item with id ${parentIdString} in global feed`);
+                        console.log(`DEBUG-COMMENT-SERVER: Warning: Could not find parent item with id ${parentIdString} in global feed`);
                     }
                 }
                 
@@ -1278,11 +1277,41 @@ app.post('/feed', validateApiKey, (req, res) => {
             break;
             
         case 'get':
-            // Return all feed items from the global pool
-            console.log(`Returning ${global.allFeedItems.length} feed items`);
+            // Calculate comment counts for all items before returning
+            console.log(`DEBUG-COMMENT-SERVER: Calculating comment counts for all ${global.allFeedItems.length} items`);
+            
+            const itemsWithCommentCounts = global.allFeedItems.map(item => {
+                // Make a copy to avoid modifying the original
+                const enrichedItem = {...item};
+                const itemId = typeof item.id === 'string' ? item.id : String(item.id);
+                
+                // Count comments for this item
+                const commentCount = global.allFeedItems.filter(potentialComment => {
+                    if (!potentialComment.parentId) return false;
+                    
+                    const parentId = typeof potentialComment.parentId === 'string' ?
+                        potentialComment.parentId : String(potentialComment.parentId);
+                    
+                    const isMatch = parentId === itemId;
+                    if (isMatch) {
+                        console.log(`DEBUG-COMMENT-SERVER: Found comment for item ${itemId}`);
+                    }
+                    return isMatch;
+                }).length;
+                
+                // Set commentCount if there are comments
+                if (commentCount > 0) {
+                    enrichedItem.commentCount = commentCount;
+                    console.log(`DEBUG-COMMENT-SERVER: Item ${itemId} has ${commentCount} comments`);
+                }
+                
+                return enrichedItem;
+            });
+            
+            console.log(`Returning ${itemsWithCommentCounts.length} feed items`);
             res.json({
                 success: true,
-                feedItems: global.allFeedItems || []
+                feedItems: itemsWithCommentCounts || []
             });
             break;
             
@@ -1302,12 +1331,24 @@ app.post('/feed', validateApiKey, (req, res) => {
                         : String(feedItem.parentId);
                     
                     processedItem.parentId = parentIdString;
-                    console.log(`Updated item has parentId: ${parentIdString}`);
+                    console.log(`DEBUG-COMMENT-SERVER: Updated item has parentId: ${parentIdString}`);
+                }
+                
+                // Preserve the comment count during updates
+                if (feedItem.commentCount) {
+                    processedItem.commentCount = feedItem.commentCount;
+                    console.log(`DEBUG-COMMENT-SERVER: Preserving comment count of ${feedItem.commentCount}`);
                 }
                 
                 // Find and update in global array
                 const globalIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
                 if (globalIndex !== -1) {
+                    // If the item has comments, make sure we preserve that count
+                    if (!processedItem.commentCount && global.allFeedItems[globalIndex].commentCount) {
+                        processedItem.commentCount = global.allFeedItems[globalIndex].commentCount;
+                        console.log(`DEBUG-COMMENT-SERVER: Restored comment count of ${processedItem.commentCount} from global item`);
+                    }
+                    
                     // Update the item in the global pool
                     global.allFeedItems[globalIndex] = processedItem;
                     console.log(`Updated item in global feed items pool`);
@@ -1328,6 +1369,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // Find the item in this session
                     const sessionIndex = session.feedItems.findIndex(item => item.id === processedItem.id);
                     if (sessionIndex !== -1) {
+                        // Preserve comment count if not in update
+                        if (!processedItem.commentCount && session.feedItems[sessionIndex].commentCount) {
+                            processedItem.commentCount = session.feedItems[sessionIndex].commentCount;
+                        }
+                        
                         // Update the item
                         session.feedItems[sessionIndex] = processedItem;
                         console.log(`Updated item in session ${sessId}`);
