@@ -1142,11 +1142,29 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.parentId = parentIdString;
                     console.log(`DEBUG-COMMENT-SERVER: Item is a comment with parentId: ${parentIdString}`);
                     
-                    // Find the parent item in the global feed using string comparison
-                    const parentGlobalIndex = global.allFeedItems.findIndex(item => {
-                        const itemId = typeof item.id === 'string' ? item.id : String(item.id);
-                        return itemId === parentIdString || itemId.includes(parentIdString);
+                    // Log the exact parentId we're looking for
+                    console.log(`DEBUG-COMMENT-SERVER: Searching for parent with ID exactly: "${parentIdString}"`);
+                    
+                    // Log all available item IDs for debugging
+                    console.log(`DEBUG-COMMENT-SERVER: Available item IDs in global feed:`);
+                    global.allFeedItems.forEach(item => {
+                        const itemIdString = typeof item.id === 'string' ? item.id : String(item.id);
+                        console.log(`- "${itemIdString}"`);
                     });
+                    
+                    // Try more strict exact match first
+                    let parentGlobalIndex = global.allFeedItems.findIndex(item => {
+                        const itemId = typeof item.id === 'string' ? item.id : String(item.id);
+                        return itemId === parentIdString;  // Strict equality first
+                    });
+                    
+                    // If not found, try the includes approach as fallback
+                    if (parentGlobalIndex === -1) {
+                        parentGlobalIndex = global.allFeedItems.findIndex(item => {
+                            const itemId = typeof item.id === 'string' ? item.id : String(item.id);
+                            return itemId.includes(parentIdString);
+                        });
+                    }
                     
                     if (parentGlobalIndex !== -1) {
                         // Increment the comment count on the parent
@@ -1155,9 +1173,27 @@ app.post('/feed', validateApiKey, (req, res) => {
                         }
                         global.allFeedItems[parentGlobalIndex].commentCount += 1;
                         
-                        console.log(`DEBUG-COMMENT-SERVER: Updated parent item comment count to ${global.allFeedItems[parentGlobalIndex].commentCount}`);
+                        console.log(`DEBUG-COMMENT-SERVER: Updated parent item (index: ${parentGlobalIndex}) comment count to ${global.allFeedItems[parentGlobalIndex].commentCount}`);
+                        
+                        // Ensure we update this parent item in all sessions too
+                        Object.keys(gameSessions).forEach(sessId => {
+                            if (gameSessions[sessId].feedItems) {
+                                const sessionParentIndex = gameSessions[sessId].feedItems.findIndex(item => {
+                                    const itemId = typeof item.id === 'string' ? item.id : String(item.id);
+                                    return itemId === parentIdString || itemId.includes(parentIdString);
+                                });
+                                
+                                if (sessionParentIndex !== -1) {
+                                    // Update comment count in this session too
+                                    gameSessions[sessId].feedItems[sessionParentIndex].commentCount =
+                                        global.allFeedItems[parentGlobalIndex].commentCount;
+                                        
+                                    console.log(`DEBUG-COMMENT-SERVER: Updated parent in session ${sessId} to count: ${gameSessions[sessId].feedItems[sessionParentIndex].commentCount}`);
+                                }
+                            }
+                        });
                     } else {
-                        console.log(`DEBUG-COMMENT-SERVER: Warning: Could not find parent item with id ${parentIdString} in global feed`);
+                        console.log(`DEBUG-COMMENT-SERVER: WARNING: Could not find parent item with id "${parentIdString}" in global feed`);
                     }
                 }
                 
