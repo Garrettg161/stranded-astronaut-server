@@ -1092,6 +1092,7 @@ app.post('/directMessages', validateApiKey, (req, res) => {
 });
 
 // Feed operations endpoint
+// Feed operations endpoint
 app.post('/feed', validateApiKey, (req, res) => {
     const { sessionId, playerId, action, feedItem, feedItemId } = req.body;
     
@@ -1132,14 +1133,21 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem = feedItem;
                 }
                 
-                // Check if this is a comment (has a parentId) and update the parent's comment count
-                if (processedItem.parentId) {
-                    console.log(`Item is a comment with parentId: ${processedItem.parentId}`);
+                // CRITICAL FIX: Ensure parentId is correctly preserved
+                if (feedItem.parentId) {
+                    // Always store parentId as a string for consistent handling
+                    const parentIdString = typeof feedItem.parentId === 'string'
+                        ? feedItem.parentId
+                        : String(feedItem.parentId);
                     
-                    // Find the parent item in the global feed
-                    const parentGlobalIndex = global.allFeedItems.findIndex(item =>
-                        item.id === processedItem.parentId
-                    );
+                    processedItem.parentId = parentIdString;
+                    console.log(`Item is a comment with parentId: ${parentIdString}`);
+                    
+                    // Find the parent item in the global feed using string comparison
+                    const parentGlobalIndex = global.allFeedItems.findIndex(item => {
+                        const itemId = typeof item.id === 'string' ? item.id : String(item.id);
+                        return itemId === parentIdString || itemId.includes(parentIdString);
+                    });
                     
                     if (parentGlobalIndex !== -1) {
                         // Increment the comment count on the parent
@@ -1149,6 +1157,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                         global.allFeedItems[parentGlobalIndex].commentCount += 1;
                         
                         console.log(`Updated parent item comment count to ${global.allFeedItems[parentGlobalIndex].commentCount}`);
+                    } else {
+                        console.log(`Warning: Could not find parent item with id ${parentIdString} in global feed`);
                     }
                 }
                 
@@ -1207,9 +1217,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                     
                     // If this is a comment, ensure parent item is updated in this session too
                     if (processedItem.parentId) {
-                        const parentSessionIndex = session.feedItems.findIndex(item =>
-                            item.id === processedItem.parentId
-                        );
+                        const parentIdString = processedItem.parentId;
+                        const parentSessionIndex = session.feedItems.findIndex(item => {
+                            const itemId = typeof item.id === 'string' ? item.id : String(item.id);
+                            return itemId === parentIdString || itemId.includes(parentIdString);
+                        });
                         
                         if (parentSessionIndex !== -1) {
                             // Ensure comment count field exists
@@ -1218,9 +1230,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                             }
                             
                             // Update to match global count
-                            const parentGlobalIndex = global.allFeedItems.findIndex(item =>
-                                item.id === processedItem.parentId
-                            );
+                            const parentGlobalIndex = global.allFeedItems.findIndex(item => {
+                                const itemId = typeof item.id === 'string' ? item.id : String(item.id);
+                                return itemId === parentIdString || itemId.includes(parentIdString);
+                            });
                             
                             if (parentGlobalIndex !== -1) {
                                 session.feedItems[parentSessionIndex].commentCount =
@@ -1242,10 +1255,16 @@ app.post('/feed', validateApiKey, (req, res) => {
             if (feedItemId) {
                 console.log(`Getting comments for feed item: ${feedItemId}`);
                 
+                // Convert feedItemId to string for consistent comparison
+                const itemIdString = typeof feedItemId === 'string' ? feedItemId : String(feedItemId);
+                
                 // Find all comments with matching parentId
-                const comments = global.allFeedItems.filter(item =>
-                    item.parentId === feedItemId
-                );
+                const comments = global.allFeedItems.filter(item => {
+                    if (!item.parentId) return false;
+                    
+                    const parentIdString = typeof item.parentId === 'string' ? item.parentId : String(item.parentId);
+                    return parentIdString === itemIdString || parentIdString.includes(itemIdString);
+                });
                 
                 console.log(`Found ${comments.length} comments for item ${feedItemId}`);
                 
@@ -1267,79 +1286,6 @@ app.post('/feed', validateApiKey, (req, res) => {
             });
             break;
             
-        case 'directMessage':
-          // Process a direct message - sent to specific users only
-          if (feedItem && feedItem.recipients && feedItem.recipients.length > 0) {
-            console.log(`Sending direct message: ${feedItem.title} [${feedItem.id}] to ${feedItem.recipients.length} recipients`);
-            
-            // Process any media content in the message first
-            let processedItem = processMediaContent(feedItem);
-            
-            // Create a copy with a new ID to avoid cross-referencing issues
-            const directMessageItem = {
-              ...processedItem,
-              id: uuidv4(), // Generate a new unique ID for this message
-              type: processedItem.type || 'text',
-              sender: {
-                id: playerId,
-                name: gameSessions[sessionId].players[playerId].name || 'Unknown',
-                organization: processedItem.organization || 'Unknown'
-              },
-              timestamp: new Date().toISOString()
-            };
-            
-            // Initialize direct messages structure if needed
-            if (!global.directMessages) {
-              global.directMessages = {};
-            }
-            
-            // Store the message for each recipient
-            processedItem.recipients.forEach(recipientName => {
-              // Try to find the recipient's ID using the mapping
-              const recipientId = getUserIdByUsername(recipientName);
-              
-              if (recipientId) {
-                // Recipient ID is known - deliver directly
-                console.log(`Found ID for recipient ${recipientName}: ${recipientId}`);
-                
-                // Initialize recipient's inbox if needed
-                if (!global.directMessages[recipientId]) {
-                  global.directMessages[recipientId] = [];
-                }
-                
-                // Add message to recipient's inbox
-                global.directMessages[recipientId].push(directMessageItem);
-                console.log(`Direct message stored for recipient: ${recipientId}`);
-                
-                // Notify recipient if online
-                notifyRecipientIfOnline(recipientId, directMessageItem);
-              } else {
-                // Recipient ID unknown - store as pending
-                const normalizedName = recipientName.toLowerCase();
-                console.log(`Recipient ID unknown for ${recipientName} - storing as pending`);
-                
-                // Initialize pending messages if needed
-                if (!global.pendingDirectMessages) {
-                  global.pendingDirectMessages = {};
-                }
-                
-                // Initialize pending messages array if needed
-                if (!global.pendingDirectMessages[normalizedName]) {
-                  global.pendingDirectMessages[normalizedName] = [];
-                }
-                
-                // Store as pending
-                global.pendingDirectMessages[normalizedName].push(directMessageItem);
-                console.log(`Message stored as pending for ${recipientName}`);
-              }
-            });
-            
-            res.json({ success: true, messageId: directMessageItem.id });
-          } else {
-            res.status(400).json({ error: 'Missing feed item data or recipients' });
-          }
-          break;
-        
         case 'update':
             // This handles updating an existing feed item (edit functionality)
             if (feedItem && feedItem.id) {
@@ -1347,6 +1293,17 @@ app.post('/feed', validateApiKey, (req, res) => {
                 
                 // Process media content if present
                 let processedItem = processMediaContent(feedItem);
+                
+                // CRITICAL FIX: Preserve parentId during updates
+                if (feedItem.parentId) {
+                    // Always store parentId as a string
+                    const parentIdString = typeof feedItem.parentId === 'string'
+                        ? feedItem.parentId
+                        : String(feedItem.parentId);
+                    
+                    processedItem.parentId = parentIdString;
+                    console.log(`Updated item has parentId: ${parentIdString}`);
+                }
                 
                 // Find and update in global array
                 const globalIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
@@ -1401,124 +1358,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     session.messages.push(updateMessage);
                 });
                 
-                // Special handling for direct messages updates
-                if (processedItem.isDirectMessage && processedItem.recipients && processedItem.recipients.length > 0) {
-                    console.log(`Updated direct message needs to be redistributed to recipients`);
-                    
-                    // For direct messages, we need to update in recipients' inboxes
-                    processedItem.recipients.forEach(recipientName => {
-                        const recipientId = getUserIdByUsername(recipientName);
-                        
-                        if (recipientId) {
-                            // Make sure recipient has an inbox
-                            if (!global.directMessages[recipientId]) {
-                                global.directMessages[recipientId] = [];
-                            }
-                            
-                            // Check if this message is already in their inbox
-                            const messageIndex = global.directMessages[recipientId].findIndex(msg =>
-                                msg.id === processedItem.id ||
-                                (msg.originalId && msg.originalId === processedItem.id)
-                            );
-                            
-                            if (messageIndex !== -1) {
-                                // Update existing message
-                                console.log(`Updating existing message in ${recipientName}'s inbox`);
-                                global.directMessages[recipientId][messageIndex] = {
-                                    id: global.directMessages[recipientId][messageIndex].id, // Keep original ID
-                                    originalId: processedItem.id, // Store original ID for reference
-                                    sender: {
-                                        id: playerId,
-                                        name: gameSessions[sessionId].players[playerId].name || 'Unknown',
-                                        organization: processedItem.organization || 'Unknown'
-                                    },
-                                    title: processedItem.title || 'No Subject',
-                                    content: processedItem.content || '',
-                                    contentType: processedItem.type || 'text',
-                                    timestamp: new Date().toISOString(),
-                                    read: false // Mark as unread since it was updated
-                                };
-                                
-                                // Send notification of update
-                                notifyRecipientIfOnline(recipientId, global.directMessages[recipientId][messageIndex]);
-                            } else {
-                                // Add as new message
-                                console.log(`Adding updated message as new to ${recipientName}'s inbox`);
-                                const directMessage = {
-                                    id: uuidv4(),
-                                    originalId: processedItem.id, // Store original ID for reference
-                                    sender: {
-                                        id: playerId,
-                                        name: gameSessions[sessionId].players[playerId].name || 'Unknown',
-                                        organization: processedItem.organization || 'Unknown'
-                                    },
-                                    title: processedItem.title || 'No Subject',
-                                    content: processedItem.content || '',
-                                    contentType: processedItem.type || 'text',
-                                    timestamp: new Date().toISOString(),
-                                    read: false
-                                };
-                                
-                                global.directMessages[recipientId].push(directMessage);
-                                notifyRecipientIfOnline(recipientId, directMessage);
-                            }
-                        } else {
-                            // Handle unknown recipients just like in the direct message case
-                            const normalizedName = recipientName.toLowerCase();
-                            console.log(`Recipient ID unknown for ${recipientName} - storing updated message as pending`);
-                            
-                            if (!global.pendingDirectMessages) {
-                                global.pendingDirectMessages = {};
-                            }
-                            
-                            if (!global.pendingDirectMessages[normalizedName]) {
-                                global.pendingDirectMessages[normalizedName] = [];
-                            }
-                            
-                            // Check if we already have a pending message with this ID
-                            const pendingIndex = global.pendingDirectMessages[normalizedName].findIndex(msg =>
-                                msg.id === processedItem.id ||
-                                (msg.originalId && msg.originalId === processedItem.id)
-                            );
-                            
-                            if (pendingIndex !== -1) {
-                                // Update existing pending message
-                                global.pendingDirectMessages[normalizedName][pendingIndex] = {
-                                    id: global.pendingDirectMessages[normalizedName][pendingIndex].id,
-                                    originalId: processedItem.id,
-                                    sender: {
-                                        id: playerId,
-                                        name: gameSessions[sessionId].players[playerId].name || 'Unknown',
-                                        organization: processedItem.organization || 'Unknown'
-                                    },
-                                    title: processedItem.title || 'No Subject',
-                                    content: processedItem.content || '',
-                                    contentType: processedItem.type || 'text',
-                                    timestamp: new Date().toISOString(),
-                                    read: false
-                                };
-                            } else {
-                                // Add as new pending message
-                                global.pendingDirectMessages[normalizedName].push({
-                                    id: uuidv4(),
-                                    originalId: processedItem.id,
-                                    sender: {
-                                        id: playerId,
-                                        name: gameSessions[sessionId].players[playerId].name || 'Unknown',
-                                        organization: processedItem.organization || 'Unknown'
-                                    },
-                                    title: processedItem.title || 'No Subject',
-                                    content: processedItem.content || '',
-                                    contentType: processedItem.type || 'text',
-                                    timestamp: new Date().toISOString(),
-                                    read: false
-                                });
-                            }
-                        }
-                    });
-                }
-                
-                console.log(`Feed item ${processedItem.id} updated in all sessions/inboxes`);
+                console.log(`Feed item ${processedItem.id} updated in all sessions`);
                 res.json({ success: true, feedItemId: processedItem.id });
             } else {
                 res.status(400).json({ error: 'Missing feed item data or ID' });
@@ -1526,7 +1366,7 @@ app.post('/feed', validateApiKey, (req, res) => {
             break;
             
         case 'delete':
-            // Delete logic remains similar but now removes from global array too
+            // Delete logic
             if (feedItem && feedItem.id) {
                 console.log(`Deleting feed item: ${feedItem.id}`);
                 
