@@ -7,7 +7,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // MongoDB connection setup
-const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://dworlduser:dworldpassword@cluster0.mongodb.net/dworld';
+const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/dworld';
 
 mongoose.connect(mongoUri, {
   useNewUrlParser: true,
