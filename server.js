@@ -1392,8 +1392,9 @@ app.post('/feed', validateApiKey, (req, res) => {
             
         case 'updateCommentCount':
             if (feedItemId && typeof commentCount === 'number') {
-                console.log(`Explicit comment count update request for item ${feedItemId} to ${commentCount}`);
-                
+
+                // Add this to the beginning of the updateCommentCount case:
+                console.log(`DEBUG-SERVER-COMMENT: Received request to update comment count for ${feedItemId} to ${commentCount}`);
                 // Update in MongoDB
                 FeedItem.findOneAndUpdate(
                     { id: String(feedItemId) },
