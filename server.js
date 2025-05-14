@@ -1186,6 +1186,12 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem = {...feedItem};
                 }
                 
+                // CRITICAL FIX: Assign a unique numeric ID as string
+                if (!processedItem.feedItemID) {
+                    processedItem.feedItemID = (feedItemIdCounter++).toString();
+                    console.log(`Assigned new feedItemID: ${processedItem.feedItemID}`);
+                }
+                
                 // CRITICAL FIX: Ensure parentId is correctly preserved
                 if (feedItem.parentId) {
                     // Always store parentId as received without modification
@@ -1194,7 +1200,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     
                     // Update parent's comment count in MongoDB first
                     FeedItem.findOneAndUpdate(
-                        { id: String(feedItem.parentId) },
+                        { feedItemID: String(feedItem.parentId) },
                         { $inc: { commentCount: 1 } },
                         { new: true }
                     ).then(updatedParent => {
@@ -1203,7 +1209,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                             
                             // Also update parent in memory
                             const parentIndex = global.allFeedItems.findIndex(item =>
-                                String(item.id) === String(feedItem.parentId)
+                                String(item.feedItemID) === String(feedItem.parentId)
                             );
                             
                             if (parentIndex !== -1) {
@@ -1219,7 +1225,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                         
                         // Fall back to memory-only update if DB fails
                         const parentIndex = global.allFeedItems.findIndex(item =>
-                            String(item.id) === String(feedItem.parentId)
+                            String(item.feedItemID) === String(feedItem.parentId)
                         );
                         
                         if (parentIndex !== -1) {
@@ -1238,7 +1244,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem,
                     { upsert: true, new: true }
                 ).then(savedItem => {
-                    console.log(`Item saved to MongoDB: ${savedItem.id}`);
+                    console.log(`Item saved to MongoDB: ${savedItem.id} with feedItemID: ${savedItem.feedItemID}`);
                     
                     // Add to global feed items if not already there
                     const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
@@ -1309,7 +1315,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                     });
                     
                     console.log(`Feed item ${processedItem.id} published to all sessions`);
-                    res.json({ success: true, feedItemId: processedItem.id });
+                    res.json({
+                        success: true,
+                        feedItemId: processedItem.id,
+                        feedItemID: processedItem.feedItemID // Include the numeric ID in response
+                    });
                 }).catch(err => {
                     console.error(`Error saving to MongoDB: ${err}`);
                     
@@ -1328,7 +1338,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                         console.log(`Added item to session ${sessionId} feed items (DB fallback)`);
                     }
                     
-                    res.json({ success: true, feedItemId: processedItem.id });
+                    res.json({
+                        success: true,
+                        feedItemId: processedItem.id,
+                        feedItemID: processedItem.feedItemID // Include the numeric ID in response
+                    });
                 });
             } else {
                 res.status(400).json({ error: 'Missing feed item data' });
