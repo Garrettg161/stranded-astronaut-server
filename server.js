@@ -6,6 +6,8 @@ const mongoose = require('mongoose');
 const app = express();
 const port = process.env.PORT || 3000;
 
+let feedItemIdCounter = 1000; // Initialize with a starting value
+
 // MongoDB connection setup
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/dworld';
 
