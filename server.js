@@ -6,58 +6,186 @@ const mongoose = require('mongoose');
 const app = express();
 const port = process.env.PORT || 3000;
 
-let feedItemIdCounter = 1000; // Initialize with a starting value
+// Global variables
+let feedItemIdCounter = 1000; // Initial default value, will be properly set during initialization
+global.allFeedItems = [];
+global.directMessages = {};
+global.usernameMappings = {};
+global.pendingDirectMessages = {};
+global.mediaContent = {};
+const MAX_MEDIA_SIZE = 10 * 1024 * 1024;
 
 // MongoDB connection setup
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/dworld';
 
-mongoose.connect(mongoUri, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => {
-  console.log('Connected to MongoDB database');
-}).catch(err => {
-  console.error('MongoDB connection error:', err);
-});
-
 // FeedItem schema and model
 const feedItemSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
-  type: { type: String, required: true },
-  title: { type: String, required: true },
-  content: { type: String, required: true },
-  author: { type: String, required: true },
-  authorId: { type: String, required: true },
-  organization: { type: String, default: 'Resistance' },
-  timestamp: { type: Date, default: Date.now },
-  imageUrl: String,
-  videoUrl: String,
-  audioUrl: String,
-  webUrl: String,
-  parentId: String,
-  commentCount: { type: Number, default: 0 },
-  isDirectMessage: { type: Boolean, default: false },
-  recipients: [String],
-  isGroupMessage: { type: Boolean, default: false },
-  groupName: String,
-  topics: [String],
-  isDeleted: { type: Boolean, default: false }
+   id: { type: String, required: true, unique: true },
+   type: { type: String, required: true },
+   title: { type: String, required: true },
+   content: { type: String, required: true },
+   author: { type: String, required: true },
+   authorId: { type: String, required: true },
+   organization: { type: String, default: 'Resistance' },
+   timestamp: { type: Date, default: Date.now },
+   imageUrl: String,
+   videoUrl: String,
+   audioUrl: String,
+   webUrl: String,
+   parentId: String,
+   feedItemID: { type: String, index: true }, // Indexed for faster lookups
+   commentCount: { type: Number, default: 0 },
+   isDirectMessage: { type: Boolean, default: false },
+   recipients: [String],
+   isGroupMessage: { type: Boolean, default: false },
+   groupName: String,
+   topics: [String],
+   isDeleted: { type: Boolean, default: false }
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
 
-// Global feed items storage
-global.allFeedItems = [];
-// Global direct messages storage
-global.directMessages = {};
-// Global username to userId mapping
-global.usernameMappings = {};
-// Global pending direct messages storage
-global.pendingDirectMessages = {};
-// Global media content storage
-global.mediaContent = {};
-// Maximum media size limit (10MB)
-const MAX_MEDIA_SIZE = 10 * 1024 * 1024;
+// Initialize feedItemIdCounter from the database
+function initializeFeedItemIdCounter() {
+   return new Promise((resolve, reject) => {
+       // Find the highest existing feedItemID in the database
+       FeedItem.find({})
+           .sort({ feedItemID: -1 }) // Sort by feedItemID in descending order
+           .limit(1) // Get just the highest one
+           .then(items => {
+               if (items.length > 0 && items[0].feedItemID) {
+                   // Get the highest ID and add 1
+                   const maxId = parseInt(items[0].feedItemID, 10);
+                   if (!isNaN(maxId)) {
+                       feedItemIdCounter = maxId + 1;
+                   } else {
+                       feedItemIdCounter = 1000; // Fallback if parsing fails
+                   }
+               } else {
+                   feedItemIdCounter = 1000; // Default starting value if no items exist
+               }
+               console.log(`Initialized feedItemIdCounter to ${feedItemIdCounter} (continuing from previous highest ID)`);
+               resolve();
+           })
+           .catch(err => {
+               console.error(`Error initializing feedItemIdCounter: ${err}`);
+               // Better to crash than to create duplicates
+               reject(new Error('Critical error: Unable to initialize feedItemIdCounter'));
+           });
+   });
+}
+
+// Function to load items from MongoDB at startup
+function loadItemsFromDatabase() {
+   return new Promise((resolve, reject) => {
+       FeedItem.find({ isDeleted: false })
+           .then(items => {
+               console.log(`Loaded ${items.length} feed items from MongoDB`);
+               global.allFeedItems = items;
+               resolve(items);
+           })
+           .catch(err => {
+               console.error(`Error loading items from MongoDB: ${err}`);
+               reject(err);
+           });
+   });
+}
+
+// Test endpoint to check the current state of feedItemIdCounter
+app.get('/debug/counter', validateApiKey, (req, res) => {
+   res.json({
+       feedItemIdCounter: feedItemIdCounter,
+       itemCount: global.allFeedItems.length,
+       feedItemIDs: global.allFeedItems.map(item => ({
+           id: item.id,
+           feedItemID: item.feedItemID,
+           title: item.title
+       }))
+   });
+});
+
+// Test endpoint to find duplicates/replicants
+app.get('/debug/duplicates', validateApiKey, (req, res) => {
+   // Check for duplicate ids
+   const idCounts = {};
+   const feedItemIDCounts = {};
+   const duplicates = {
+       byId: [],
+       byFeedItemID: []
+   };
+   
+   global.allFeedItems.forEach(item => {
+       // Count occurrences of each id
+       if (idCounts[item.id]) {
+           idCounts[item.id]++;
+           if (idCounts[item.id] === 2) { // Only add when we find the second occurrence
+               duplicates.byId.push(item.id);
+           }
+       } else {
+           idCounts[item.id] = 1;
+       }
+       
+       // Count occurrences of each feedItemID
+       if (item.feedItemID) {
+           if (feedItemIDCounts[item.feedItemID]) {
+               feedItemIDCounts[item.feedItemID]++;
+               if (feedItemIDCounts[item.feedItemID] === 2) {
+                   duplicates.byFeedItemID.push(item.feedItemID);
+               }
+           } else {
+               feedItemIDCounts[item.feedItemID] = 1;
+           }
+       }
+   });
+   
+   res.json({
+       totalItems: global.allFeedItems.length,
+       duplicateIds: duplicates.byId,
+       duplicateFeedItemIDs: duplicates.byFeedItemID,
+       details: {
+           byId: Object.entries(idCounts)
+               .filter(([_, count]) => count > 1)
+               .map(([id, count]) => ({ id, count })),
+           byFeedItemID: Object.entries(feedItemIDCounts)
+               .filter(([_, count]) => count > 1)
+               .map(([id, count]) => ({ id, count }))
+       }
+   });
+});
+
+// Test endpoint for comments
+app.get('/debug/comments/:feedItemId', validateApiKey, (req, res) => {
+   const feedItemId = req.params.feedItemId;
+   
+   // Find the parent item
+   const parentItem = global.allFeedItems.find(item => item.id === feedItemId);
+   
+   if (!parentItem) {
+       return res.status(404).json({ error: 'Parent item not found' });
+   }
+   
+   // Find comments for this item
+   const comments = global.allFeedItems.filter(item => {
+       return item.parentId === feedItemId;
+   });
+   
+   res.json({
+       parent: {
+           id: parentItem.id,
+           feedItemID: parentItem.feedItemID,
+           title: parentItem.title,
+           commentCount: parentItem.commentCount
+       },
+       comments: comments.map(comment => ({
+           id: comment.id,
+           feedItemID: comment.feedItemID,
+           title: comment.title,
+           content: comment.content,
+           parentId: comment.parentId
+       })),
+       commentCount: comments.length
+   });
+});
 
 // Middleware
 app.use(cors());
@@ -65,19 +193,19 @@ app.use(bodyParser.json({ limit: '20mb' })); // Increase JSON size limit for bas
 
 // API Key validation middleware
 const validateApiKey = (req, res, next) => {
-    const authHeader = req.headers.authorization;
-    
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Unauthorized - Missing or invalid API key' });
-    }
-    
-    const apiKey = authHeader.split(' ')[1];
-    // Simple API key for demo purposes - in production use a secure method
-    if (apiKey !== 'b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA') {
-        return res.status(401).json({ error: 'Unauthorized - Invalid API key' });
-    }
-    
-    next();
+   const authHeader = req.headers.authorization;
+   
+   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+       return res.status(401).json({ error: 'Unauthorized - Missing or invalid API key' });
+   }
+   
+   const apiKey = authHeader.split(' ')[1];
+   // Simple API key for demo purposes - in production use a secure method
+   if (apiKey !== 'b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA') {
+       return res.status(401).json({ error: 'Unauthorized - Invalid API key' });
+   }
+   
+   next();
 };
 
 // In-memory storage for game sessions
@@ -86,89 +214,98 @@ const gameSessions = {};
 // In-memory storage for players
 const players = {};
 
-// Function to load items from MongoDB at startup
-function loadItemsFromDatabase() {
-    FeedItem.find({ isDeleted: false })
-        .then(items => {
-            console.log(`Loaded ${items.length} feed items from MongoDB`);
-            global.allFeedItems = items;
-        })
-        .catch(err => {
-            console.error(`Error loading items from MongoDB: ${err}`);
-        });
-}
-
-// Load items when server starts
-loadItemsFromDatabase();
+// Initialize server properly
+mongoose.connect(mongoUri, {
+ useNewUrlParser: true,
+ useUnifiedTopology: true
+}).then(() => {
+ console.log('Connected to MongoDB database');
+ 
+ // First load the feed items
+ return loadItemsFromDatabase();
+}).then(() => {
+ // Then initialize the feedItemIdCounter from the highest ID
+ return initializeFeedItemIdCounter();
+}).then(() => {
+ // Only start the server AFTER items are loaded and counter is initialized
+ app.listen(port, () => {
+   console.log(`Stranded Astronaut Multiplayer Server v2.5 with Resistance Feed Support & Comments`);
+   console.log(`Server initialized with ${global.allFeedItems ? global.allFeedItems.length : 0} global feed items`);
+   console.log(`FeedItemIdCounter initialized to: ${feedItemIdCounter}`);
+ });
+}).catch(err => {
+ console.error('Server initialization error:', err);
+ process.exit(1); // Exit if we can't initialize properly
+});
 
 // Routes
 app.get('/', (req, res) => {
-    res.send('Stranded Astronaut Multiplayer Server v2.5 with Resistance Feed Support & Comments');
+   res.send('Stranded Astronaut Multiplayer Server v2.5 with Resistance Feed Support & Comments');
 });
 
 // Ping endpoint for connection checking
 app.post('/ping', validateApiKey, (req, res) => {
-    res.json({ success: true, timestamp: Date.now() });
+   res.json({ success: true, timestamp: Date.now() });
 });
 
 // Create or join a session
 app.post('/join', validateApiKey, (req, res) => {
-    console.log('Join request received with body:', req.body);
-    
-    const { sessionId, playerName, sessionName, appName } = req.body;
-    
-    // Generate a player ID
-    const playerId = uuidv4();
-    
-    // Special case for dWorld app - always use a single shared session
-    if (appName === "dWorld") {
-        const DWORLD_SESSION_ID = "dworld-global-session";
-        
-        // Create the session if it doesn't exist yet
-        if (!gameSessions[DWORLD_SESSION_ID]) {
-            console.log(`Creating dedicated dWorld session: ${DWORLD_SESSION_ID}`);
-            
-            gameSessions[DWORLD_SESSION_ID] = {
-                id: DWORLD_SESSION_ID,
-                createdAt: new Date(),
-                players: {},
-                gameFacts: getDefaultGameFacts(),
-                sessionName: "dWorld Global Session",
-                globalTurn: 0,
-                timeElapsed: "1h 0m",
-                preserveClientState: true,
-                plotQuestions: {},
-                feedItems: [],
-                messages: []
-            };
-            
-            // Add any global feed items to this session
-            if (global.allFeedItems && global.allFeedItems.length > 0) {
-                gameSessions[DWORLD_SESSION_ID].feedItems = [...global.allFeedItems];
-            }
-        }
-        
-        // Add the player to the dWorld session
-        const player = createPlayer(playerId, playerName);
-        gameSessions[DWORLD_SESSION_ID].players[playerId] = player;
-        players[playerId] = {
-            id: playerId,
-            sessionId: DWORLD_SESSION_ID
-        };
-        
-        // Register username mapping
-        updateUsernameMapping(playerName, playerId);
-        
-        // Return the session info
-        return res.json({
-            sessionId: DWORLD_SESSION_ID,
-            sessionName: "dWorld Global Session",
-            shortCode: "DWORLD",
-            player: player,
-            globalTurn: gameSessions[DWORLD_SESSION_ID].globalTurn || 0,
-            timeElapsed: gameSessions[DWORLD_SESSION_ID].timeElapsed || "1h 0m"
-        });
-    }
+   console.log('Join request received with body:', req.body);
+   
+   const { sessionId, playerName, sessionName, appName } = req.body;
+   
+   // Generate a player ID
+   const playerId = uuidv4();
+   
+   // Special case for dWorld app - always use a single shared session
+   if (appName === "dWorld") {
+       const DWORLD_SESSION_ID = "dworld-global-session";
+       
+       // Create the session if it doesn't exist yet
+       if (!gameSessions[DWORLD_SESSION_ID]) {
+           console.log(`Creating dedicated dWorld session: ${DWORLD_SESSION_ID}`);
+           
+           gameSessions[DWORLD_SESSION_ID] = {
+               id: DWORLD_SESSION_ID,
+               createdAt: new Date(),
+               players: {},
+               gameFacts: getDefaultGameFacts(),
+               sessionName: "dWorld Global Session",
+               globalTurn: 0,
+               timeElapsed: "1h 0m",
+               preserveClientState: true,
+               plotQuestions: {},
+               feedItems: [],
+               messages: []
+           };
+           
+           // Add any global feed items to this session
+           if (global.allFeedItems && global.allFeedItems.length > 0) {
+               gameSessions[DWORLD_SESSION_ID].feedItems = [...global.allFeedItems];
+           }
+       }
+       
+       // Add the player to the dWorld session
+       const player = createPlayer(playerId, playerName);
+       gameSessions[DWORLD_SESSION_ID].players[playerId] = player;
+       players[playerId] = {
+           id: playerId,
+           sessionId: DWORLD_SESSION_ID
+       };
+       
+       // Register username mapping
+       updateUsernameMapping(playerName, playerId);
+       
+       // Return the session info
+       return res.json({
+           sessionId: DWORLD_SESSION_ID,
+           sessionName: "dWorld Global Session",
+           shortCode: "DWORLD",
+           player: player,
+           globalTurn: gameSessions[DWORLD_SESSION_ID].globalTurn || 0,
+           timeElapsed: gameSessions[DWORLD_SESSION_ID].timeElapsed || "1h 0m"
+       });
+   }
     
     // If sessionId is provided, try to join an existing session
     if (sessionId) {
