@@ -45,6 +45,22 @@ const feedItemSchema = new mongoose.Schema({
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
 
+// Function to load items from MongoDB at startup
+function loadItemsFromDatabase() {
+   return new Promise((resolve, reject) => {
+       FeedItem.find({ isDeleted: false })
+           .then(items => {
+               console.log(`Loaded ${items.length} feed items from MongoDB`);
+               global.allFeedItems = items;
+               resolve(items);
+           })
+           .catch(err => {
+               console.error(`Error loading items from MongoDB: ${err}`);
+               reject(err);
+           });
+   });
+}
+
 // Initialize feedItemIdCounter from the database
 function initializeFeedItemIdCounter() {
    return new Promise((resolve, reject) => {
@@ -75,21 +91,26 @@ function initializeFeedItemIdCounter() {
    });
 }
 
-// Function to load items from MongoDB at startup
-function loadItemsFromDatabase() {
-   return new Promise((resolve, reject) => {
-       FeedItem.find({ isDeleted: false })
-           .then(items => {
-               console.log(`Loaded ${items.length} feed items from MongoDB`);
-               global.allFeedItems = items;
-               resolve(items);
-           })
-           .catch(err => {
-               console.error(`Error loading items from MongoDB: ${err}`);
-               reject(err);
-           });
-   });
-}
+// Middleware
+app.use(cors());
+app.use(bodyParser.json({ limit: '20mb' })); // Increase JSON size limit for base64 data
+
+// API Key validation middleware
+const validateApiKey = (req, res, next) => {
+   const authHeader = req.headers.authorization;
+   
+   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+       return res.status(401).json({ error: 'Unauthorized - Missing or invalid API key' });
+   }
+   
+   const apiKey = authHeader.split(' ')[1];
+   // Simple API key for demo purposes - in production use a secure method
+   if (apiKey !== 'b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA') {
+       return res.status(401).json({ error: 'Unauthorized - Invalid API key' });
+   }
+   
+   next();
+};
 
 // Test endpoint to check the current state of feedItemIdCounter
 app.get('/debug/counter', validateApiKey, (req, res) => {
@@ -187,55 +208,57 @@ app.get('/debug/comments/:feedItemId', validateApiKey, (req, res) => {
    });
 });
 
-// Middleware
-app.use(cors());
-app.use(bodyParser.json({ limit: '20mb' })); // Increase JSON size limit for base64 data
-
-// API Key validation middleware
-const validateApiKey = (req, res, next) => {
-   const authHeader = req.headers.authorization;
-   
-   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-       return res.status(401).json({ error: 'Unauthorized - Missing or invalid API key' });
-   }
-   
-   const apiKey = authHeader.split(' ')[1];
-   // Simple API key for demo purposes - in production use a secure method
-   if (apiKey !== 'b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA') {
-       return res.status(401).json({ error: 'Unauthorized - Invalid API key' });
-   }
-   
-   next();
-};
-
 // In-memory storage for game sessions
 const gameSessions = {};
 
 // In-memory storage for players
 const players = {};
 
-// Initialize server properly
+// Initialize server with simpler approach to avoid crashes
 mongoose.connect(mongoUri, {
  useNewUrlParser: true,
  useUnifiedTopology: true
 }).then(() => {
  console.log('Connected to MongoDB database');
  
- // First load the feed items
- return loadItemsFromDatabase();
-}).then(() => {
- // Then initialize the feedItemIdCounter from the highest ID
- return initializeFeedItemIdCounter();
-}).then(() => {
- // Only start the server AFTER items are loaded and counter is initialized
+ // Load initial items
+ return FeedItem.find({ isDeleted: false });
+}).then(items => {
+ console.log(`Loaded ${items.length} feed items from MongoDB`);
+ global.allFeedItems = items;
+ 
+ // Find the highest feedItemID to initialize the counter
+ let maxId = 1000; // Default starting value
+ 
+ items.forEach(item => {
+   if (item.feedItemID) {
+     const idNum = parseInt(item.feedItemID, 10);
+     if (!isNaN(idNum) && idNum > maxId) {
+       maxId = idNum;
+     }
+   }
+ });
+ 
+ // Set counter to highest + 1
+ feedItemIdCounter = maxId + 1;
+ console.log(`Initialized feedItemIdCounter to ${feedItemIdCounter}`);
+ 
+ // Start the server
  app.listen(port, () => {
    console.log(`Stranded Astronaut Multiplayer Server v2.5 with Resistance Feed Support & Comments`);
-   console.log(`Server initialized with ${global.allFeedItems ? global.allFeedItems.length : 0} global feed items`);
+   console.log(`Server initialized with ${global.allFeedItems.length} global feed items`);
    console.log(`FeedItemIdCounter initialized to: ${feedItemIdCounter}`);
  });
 }).catch(err => {
- console.error('Server initialization error:', err);
- process.exit(1); // Exit if we can't initialize properly
+ console.error(`Server initialization error: ${err}`);
+ // Try a simple initialization as fallback
+ console.log('Attempting fallback initialization...');
+ 
+ feedItemIdCounter = 1002; // Safe fallback higher than existing IDs
+ 
+ app.listen(port, () => {
+   console.log(`Server started with fallback initialization on port ${port}`);
+ });
 });
 
 // Routes
