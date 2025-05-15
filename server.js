@@ -243,12 +243,12 @@ mongoose.connect(mongoUri, {
  feedItemIdCounter = maxId + 1;
  console.log(`Initialized feedItemIdCounter to ${feedItemIdCounter}`);
  
- // Start the server
- app.listen(port, () => {
-   console.log(`Stranded Astronaut Multiplayer Server v2.5 with Resistance Feed Support & Comments`);
-   console.log(`Server initialized with ${global.allFeedItems.length} global feed items`);
-   console.log(`FeedItemIdCounter initialized to: ${feedItemIdCounter}`);
- });
+ // Start the server - NOTE: Removing this app.listen call to fix the crash
+ // app.listen(port, () => {
+ //   console.log(`Stranded Astronaut Multiplayer Server v2.5 with Resistance Feed Support & Comments`);
+ //   console.log(`Server initialized with ${global.allFeedItems.length} global feed items`);
+ //   console.log(`FeedItemIdCounter initialized to: ${feedItemIdCounter}`);
+ // });
 }).catch(err => {
  console.error(`Server initialization error: ${err}`);
  // Try a simple initialization as fallback
@@ -256,9 +256,7 @@ mongoose.connect(mongoUri, {
  
  feedItemIdCounter = 1002; // Safe fallback higher than existing IDs
  
- app.listen(port, () => {
-   console.log(`Server started with fallback initialization on port ${port}`);
- });
+ // NOTE: Not starting server here either - will use single server start at the end
 });
 
 // Routes
