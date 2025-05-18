@@ -13,7 +13,6 @@
     "cors": "^2.8.5",
     "uuid": "^9.0.0",
     "mongoose": "^6.12.0",
-    "body-parser": "^1.20.2",
     "fs-extra": "^11.1.1"
   },
   "engines": {
