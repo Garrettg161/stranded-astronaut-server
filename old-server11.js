@@ -40,7 +40,6 @@ const feedItemSchema = new mongoose.Schema({
    isGroupMessage: { type: Boolean, default: false },
    groupName: String,
    topics: [String],
-   attributedContentData: String,  // Added field for rich text attributes
    isDeleted: { type: Boolean, default: false }
 });
 
