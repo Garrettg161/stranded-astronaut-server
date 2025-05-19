@@ -1326,191 +1326,197 @@ app.post('/feed', validateApiKey, (req, res) => {
     // Handle different actions
     switch (action) {
         case 'publish':
-                    // Add the feed item to both the global feed and the session's feed
-                    if (feedItem) {
-                        console.log(`Publishing feed item: ${feedItem.title} [${feedItem.id}]`);
-                        
-                        // Process the feed item - but make it safer
-                        let processedItem;
-                        try {
-                            // Only process media if needed
-                            if (feedItem.type === 'image' || feedItem.type === 'video' || feedItem.type === 'audio') {
-                                processedItem = processMediaContent(feedItem);
-                            } else {
-                                // For text and other non-media items, use as-is
-                                processedItem = {...feedItem};
-                            }
-                        } catch (error) {
-                            console.error("Error processing media:", error);
-                            // Fall back to the original item if processing fails
-                            processedItem = {...feedItem};
-                        }
-                        
-                        // CRITICAL FIX: Assign a unique numeric ID as string
-                        if (!processedItem.feedItemID) {
-                            processedItem.feedItemID = (feedItemIdCounter++).toString();
-                            console.log(`Assigned new feedItemID: ${processedItem.feedItemID}`);
-                        }
-                        
-                        // CRITICAL FIX: Ensure parentId is correctly preserved
-                        if (feedItem.parentId) {
-                            // Always store parentId as received without modification
-                            processedItem.parentId = feedItem.parentId;
-                            console.log(`DEBUG-COMMENT-SERVER: Item is a comment with parentId: ${feedItem.parentId}`);
-                            
-                            // Update parent's comment count in MongoDB first
-                            // FIXED: Look up parent by id instead of feedItemID
-                            FeedItem.findOneAndUpdate(
-                                { id: String(feedItem.parentId) },  // Changed from feedItemID to id
-                                { $inc: { commentCount: 1 } },
-                                { new: true }
-                            ).then(updatedParent => {
-                                if (updatedParent) {
-                                    console.log(`DEBUG-COMMENT-SERVER: Updated parent in DB with comment count: ${updatedParent.commentCount}`);
-                                    
-                                    // Also update parent in memory
-                                    // FIXED: Look up parent by id instead of feedItemID
-                                    const parentIndex = global.allFeedItems.findIndex(item =>
-                                        String(item.id) === String(feedItem.parentId)  // Changed from feedItemID to id
-                                    );
-                                    
-                                    if (parentIndex !== -1) {
-                                        if (!global.allFeedItems[parentIndex].commentCount) {
-                                            global.allFeedItems[parentIndex].commentCount = 0;
-                                        }
-                                        global.allFeedItems[parentIndex].commentCount = updatedParent.commentCount;
-                                        console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory with count: ${updatedParent.commentCount}`);
-                                    }
-                                }
-                            }).catch(err => {
-                                console.error(`DEBUG-COMMENT-SERVER: Error updating parent comment count: ${err}`);
-                                
-                                // Fall back to memory-only update if DB fails
-                                // FIXED: Look up parent by id instead of feedItemID
-                                const parentIndex = global.allFeedItems.findIndex(item =>
-                                    String(item.id) === String(feedItem.parentId)  // Changed from feedItemID to id
-                                );
-                                
-                                if (parentIndex !== -1) {
-                                    if (!global.allFeedItems[parentIndex].commentCount) {
-                                        global.allFeedItems[parentIndex].commentCount = 0;
-                                    }
-                                    global.allFeedItems[parentIndex].commentCount += 1;
-                                    console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory only with count: ${global.allFeedItems[parentIndex].commentCount}`);
-                                }
-                            });
-                        }
-                        
-                        // Save to MongoDB and propagate to memory
-                        FeedItem.findOneAndUpdate(
-                            { id: processedItem.id },
-                            processedItem,
-                            { upsert: true, new: true }
-                        ).then(savedItem => {
-                            console.log(`Item saved to MongoDB: ${savedItem.id} with feedItemID: ${savedItem.feedItemID}`);
-                            
-                            // Add to global feed items if not already there
-                            const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
-                            if (!alreadyInGlobal) {
-                                global.allFeedItems.push(processedItem);
-                                console.log(`Added item to global feed items pool`);
-                            } else {
-                                // Update existing item
-                                const itemIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
-                                if (itemIndex !== -1) {
-                                    global.allFeedItems[itemIndex] = processedItem;
-                                    console.log(`Updated existing item in global feed items pool`);
-                                }
-                            }
-                            
-                            // Add to session feed items if not already there
-                            const alreadyInSession = gameSessions[sessionId].feedItems.some(item => item.id === processedItem.id);
-                            if (!alreadyInSession) {
-                                gameSessions[sessionId].feedItems.push(processedItem);
-                                console.log(`Added item to session ${sessionId} feed items`);
-                            } else {
-                                // Update existing item
-                                const itemIndex = gameSessions[sessionId].feedItems.findIndex(item => item.id === processedItem.id);
-                                if (itemIndex !== -1) {
-                                    gameSessions[sessionId].feedItems[itemIndex] = processedItem;
-                                    console.log(`Updated existing item in session ${sessionId}`);
-                                }
-                            }
-                            
-                            // Also create a message to notify all users
-                            const messageContent = `FEED_ITEM:${JSON.stringify(processedItem)}`;
-                            
-                            // Add to all active sessions for propagation
-                            Object.keys(gameSessions).forEach(sessId => {
-                                const session = gameSessions[sessId];
-                                
-                                // Create message object for each session
-                                const message = {
-                                    id: uuidv4(),
-                                    sessionId: sessId,
-                                    senderId: playerId,
-                                    senderName: gameSessions[sessionId].players[playerId].name,
-                                    targetId: null,
-                                    content: messageContent,
-                                    timestamp: new Date().getTime(),
-                                    isSystemMessage: false
-                                };
-                                
-                                // Initialize messages array if needed
-                                if (!session.messages) {
-                                    session.messages = [];
-                                }
-                                
-                                // Add message to session
-                                session.messages.push(message);
-                                
-                                // Add feed item to session's feed items
-                                if (!session.feedItems) {
-                                    session.feedItems = [];
-                                }
-                                
-                                // Only add if not already present (by ID)
-                                const alreadyInTargetSession = session.feedItems.some(item => item.id === processedItem.id);
-                                if (!alreadyInTargetSession) {
-                                    session.feedItems.push(processedItem);
-                                    console.log(`Propagated feed item to session: ${sessId}`);
-                                }
-                            });
-                            
-                            console.log(`Feed item ${processedItem.id} published to all sessions`);
-                            res.json({
-                                success: true,
-                                feedItemId: processedItem.id,
-                                feedItemID: processedItem.feedItemID // Include the numeric ID in response
-                            });
-                        }).catch(err => {
-                            console.error(`Error saving to MongoDB: ${err}`);
-                            
-                            // Fallback to memory-only if DB fails
-                            // Add to global feed items if not already there
-                            const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
-                            if (!alreadyInGlobal) {
-                                global.allFeedItems.push(processedItem);
-                                console.log(`Added item to global feed items pool (DB fallback)`);
-                            }
-                            
-                            // Add to session feed items if not already there
-                            const alreadyInSession = gameSessions[sessionId].feedItems.some(item => item.id === processedItem.id);
-                            if (!alreadyInSession) {
-                                gameSessions[sessionId].feedItems.push(processedItem);
-                                console.log(`Added item to session ${sessionId} feed items (DB fallback)`);
-                            }
-                            
-                            res.json({
-                                success: true,
-                                feedItemId: processedItem.id,
-                                feedItemID: processedItem.feedItemID // Include the numeric ID in response
-                            });
-                        });
+            // Add the feed item to both the global feed and the session's feed
+            if (feedItem) {
+                console.log(`Publishing feed item: ${feedItem.title} [${feedItem.id}]`);
+                
+                // Process the feed item - but make it safer
+                let processedItem;
+                try {
+                    // Only process media if needed
+                    if (feedItem.type === 'image' || feedItem.type === 'video' || feedItem.type === 'audio') {
+                        processedItem = processMediaContent(feedItem);
                     } else {
-                        res.status(400).json({ error: 'Missing feed item data' });
+                        // For text and other non-media items, use as-is
+                        processedItem = {...feedItem};
                     }
-                    break;
+                    
+                    // CRITICAL FIX: Always set a new timestamp for comments
+                    if (feedItem.parentId) {
+                        // This is a comment, make sure timestamp is current
+                        processedItem.timestamp = new Date();  // This ensures it gets saved as a proper Date object
+                    }
+                } catch (error) {
+                    console.error("Error processing media:", error);
+                    // Fall back to the original item if processing fails
+                    processedItem = {...feedItem};
+                }
+                
+                // CRITICAL FIX: Assign a unique numeric ID as string
+                if (!processedItem.feedItemID) {
+                    processedItem.feedItemID = (feedItemIdCounter++).toString();
+                    console.log(`Assigned new feedItemID: ${processedItem.feedItemID}`);
+                }
+                
+                // CRITICAL FIX: Ensure parentId is correctly preserved
+                if (feedItem.parentId) {
+                    // Always store parentId as received without modification
+                    processedItem.parentId = feedItem.parentId;
+                    console.log(`DEBUG-COMMENT-SERVER: Item is a comment with parentId: ${feedItem.parentId}`);
+                    
+                    // Update parent's comment count in MongoDB first
+                    // FIXED: Look up parent by id instead of feedItemID
+                    FeedItem.findOneAndUpdate(
+                        { id: String(feedItem.parentId) },  // Changed from feedItemID to id
+                        { $inc: { commentCount: 1 } },
+                        { new: true }
+                    ).then(updatedParent => {
+                        if (updatedParent) {
+                            console.log(`DEBUG-COMMENT-SERVER: Updated parent in DB with comment count: ${updatedParent.commentCount}`);
+                            
+                            // Also update parent in memory
+                            // FIXED: Look up parent by id instead of feedItemID
+                            const parentIndex = global.allFeedItems.findIndex(item =>
+                                String(item.id) === String(feedItem.parentId)  // Changed from feedItemID to id
+                            );
+                            
+                            if (parentIndex !== -1) {
+                                if (!global.allFeedItems[parentIndex].commentCount) {
+                                    global.allFeedItems[parentIndex].commentCount = 0;
+                                }
+                                global.allFeedItems[parentIndex].commentCount = updatedParent.commentCount;
+                                console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory with count: ${updatedParent.commentCount}`);
+                            }
+                        }
+                    }).catch(err => {
+                        console.error(`DEBUG-COMMENT-SERVER: Error updating parent comment count: ${err}`);
+                        
+                        // Fall back to memory-only update if DB fails
+                        // FIXED: Look up parent by id instead of feedItemID
+                        const parentIndex = global.allFeedItems.findIndex(item =>
+                            String(item.id) === String(feedItem.parentId)  // Changed from feedItemID to id
+                        );
+                        
+                        if (parentIndex !== -1) {
+                            if (!global.allFeedItems[parentIndex].commentCount) {
+                                global.allFeedItems[parentIndex].commentCount = 0;
+                            }
+                            global.allFeedItems[parentIndex].commentCount += 1;
+                            console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory only with count: ${global.allFeedItems[parentIndex].commentCount}`);
+                        }
+                    });
+                }
+                
+                // Save to MongoDB and propagate to memory
+                FeedItem.findOneAndUpdate(
+                    { id: processedItem.id },
+                    processedItem,
+                    { upsert: true, new: true }
+                ).then(savedItem => {
+                    console.log(`Item saved to MongoDB: ${savedItem.id} with feedItemID: ${savedItem.feedItemID}`);
+                    
+                    // Add to global feed items if not already there
+                    const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
+                    if (!alreadyInGlobal) {
+                        global.allFeedItems.push(processedItem);
+                        console.log(`Added item to global feed items pool`);
+                    } else {
+                        // Update existing item
+                        const itemIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
+                        if (itemIndex !== -1) {
+                            global.allFeedItems[itemIndex] = processedItem;
+                            console.log(`Updated existing item in global feed items pool`);
+                        }
+                    }
+                    
+                    // Add to session feed items if not already there
+                    const alreadyInSession = gameSessions[sessionId].feedItems.some(item => item.id === processedItem.id);
+                    if (!alreadyInSession) {
+                        gameSessions[sessionId].feedItems.push(processedItem);
+                        console.log(`Added item to session ${sessionId} feed items`);
+                    } else {
+                        // Update existing item
+                        const itemIndex = gameSessions[sessionId].feedItems.findIndex(item => item.id === processedItem.id);
+                        if (itemIndex !== -1) {
+                            gameSessions[sessionId].feedItems[itemIndex] = processedItem;
+                            console.log(`Updated existing item in session ${sessionId}`);
+                        }
+                    }
+                    
+                    // Also create a message to notify all users
+                    const messageContent = `FEED_ITEM:${JSON.stringify(processedItem)}`;
+                    
+                    // Add to all active sessions for propagation
+                    Object.keys(gameSessions).forEach(sessId => {
+                        const session = gameSessions[sessId];
+                        
+                        // Create message object for each session
+                        const message = {
+                            id: uuidv4(),
+                            sessionId: sessId,
+                            senderId: playerId,
+                            senderName: gameSessions[sessionId].players[playerId].name,
+                            targetId: null,
+                            content: messageContent,
+                            timestamp: new Date().getTime(),
+                            isSystemMessage: false
+                        };
+                        
+                        // Initialize messages array if needed
+                        if (!session.messages) {
+                            session.messages = [];
+                        }
+                        
+                        // Add message to session
+                        session.messages.push(message);
+                        
+                        // Add feed item to session's feed items
+                        if (!session.feedItems) {
+                            session.feedItems = [];
+                        }
+                        
+                        // Only add if not already present (by ID)
+                        const alreadyInTargetSession = session.feedItems.some(item => item.id === processedItem.id);
+                        if (!alreadyInTargetSession) {
+                            session.feedItems.push(processedItem);
+                            console.log(`Propagated feed item to session: ${sessId}`);
+                        }
+                    });
+                    
+                    console.log(`Feed item ${processedItem.id} published to all sessions`);
+                    res.json({
+                        success: true,
+                        feedItemId: processedItem.id,
+                        feedItemID: processedItem.feedItemID // Include the numeric ID in response
+                    });
+                }).catch(err => {
+                    console.error(`Error saving to MongoDB: ${err}`);
+                    
+                    // Fallback to memory-only if DB fails
+                    // Add to global feed items if not already there
+                    const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
+                    if (!alreadyInGlobal) {
+                        global.allFeedItems.push(processedItem);
+                        console.log(`Added item to global feed items pool (DB fallback)`);
+                    }
+                    
+                    // Add to session feed items if not already there
+                    const alreadyInSession = gameSessions[sessionId].feedItems.some(item => item.id === processedItem.id);
+                    if (!alreadyInSession) {
+                        gameSessions[sessionId].feedItems.push(processedItem);
+                        console.log(`Added item to session ${sessionId} feed items (DB fallback)`);
+                    }
+                    
+                    res.json({
+                        success: true,
+                        feedItemId: processedItem.id,
+                        feedItemID: processedItem.feedItemID // Include the numeric ID in response
+                    });
+                });
+            } else {
+                res.status(400).json({ error: 'Missing feed item data' });
+            }
+            break;
                     
                 case 'getComments':
                     // Get comments for a specific feed item
