@@ -43,18 +43,6 @@ const feedItemSchema = new mongoose.Schema({
    attributedContentData: String,
    isDeleted: { type: Boolean, default: false },
    isRepost: { type: Boolean, default: false }  // ADD THIS LINE
-    metadata: mongoose.Schema.Types.Mixed
-    eventDescription: String,
-    eventStartDate: Date,
-    eventEndDate: Date,
-    eventTime: String,
-    eventLocation: String,
-    eventZoomURL: String,
-    eventGoogleMeetURL: String,
-    eventSubstackURL: String,
-    eventStoredVideoURL: String,
-    hasCalendarPermission: { type: Boolean, default: false },
-    eventIdentifier: String
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
