@@ -42,8 +42,8 @@ const feedItemSchema = new mongoose.Schema({
    topics: [String],
    attributedContentData: String,
    isDeleted: { type: Boolean, default: false },
-   isRepost: { type: Boolean, default: false }  // ADD THIS LINE
-    metadata: mongoose.Schema.Types.Mixed
+   isRepost: { type: Boolean, default: false },  // ADD THIS LINE
+    metadata: mongoose.Schema.Types.Mixed,
     eventDescription: String,
     eventStartDate: Date,
     eventEndDate: Date,
