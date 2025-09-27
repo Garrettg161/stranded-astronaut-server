@@ -1726,6 +1726,31 @@ app.post('/feed', validateApiKey, (req, res) => {
                             console.log(`DEBUG-REPOST: Updating item with isRepost=${feedItem.isRepost}`);
                         }
                         
+                        // ADD THIS: Preserve ALL Event-specific fields during updates
+                        if (feedItem.type === 'event') {
+                            console.log(`DEBUG-SERVER-EVENT: Preserving Event fields for update`);
+                            
+                            processedItem.eventDescription = feedItem.eventDescription;
+                            
+                            // CRITICAL: Preserve Event dates
+                            if (feedItem.eventStartDate) {
+                                processedItem.eventStartDate = new Date(feedItem.eventStartDate);
+                                console.log(`DEBUG-SERVER-EVENT: Preserved eventStartDate: ${processedItem.eventStartDate}`);
+                            }
+                            if (feedItem.eventEndDate) {
+                                processedItem.eventEndDate = new Date(feedItem.eventEndDate);
+                            }
+                            
+                            processedItem.eventTime = feedItem.eventTime;
+                            processedItem.eventLocation = feedItem.eventLocation;
+                            processedItem.eventZoomURL = feedItem.eventZoomURL;
+                            processedItem.eventGoogleMeetURL = feedItem.eventGoogleMeetURL;
+                            processedItem.eventSubstackURL = feedItem.eventSubstackURL;
+                            processedItem.eventStoredVideoURL = feedItem.eventStoredVideoURL;
+                            processedItem.hasCalendarPermission = feedItem.hasCalendarPermission;
+                            processedItem.eventIdentifier = feedItem.eventIdentifier;
+                        }
+                        
                         // Check if this item already exists (meaning it's an edit)
                         const isEdit = global.allFeedItems.some(item => item.id === processedItem.id);
                         if (isEdit) {
