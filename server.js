@@ -1663,7 +1663,43 @@ app.post('/feed', validateApiKey, (req, res) => {
                         res.status(400).json({ error: 'Missing feed item ID or invalid comment count' });
                     }
                     break;
-            
+            case 'updateVoteCount':
+                if (feedItemId && feedItem) {
+                    console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvals: ${feedItem.approvalCount}, disapprovals: ${feedItem.disapprovalCount}`);
+                    
+                    FeedItem.findOneAndUpdate(
+                        { id: String(feedItemId) },
+                        {
+                            approvalCount: feedItem.approvalCount,
+                            disapprovalCount: feedItem.disapprovalCount
+                        },
+                        { new: true }
+                    ).then(updatedItem => {
+                        if (updatedItem) {
+                            console.log(`DEBUG-VOTE-SERVER: Votes updated in MongoDB`);
+                            
+                            const globalIndex = global.allFeedItems.findIndex(item =>
+                                String(item.id) === String(feedItemId)
+                            );
+                            
+                            if (globalIndex !== -1) {
+                                global.allFeedItems[globalIndex].approvalCount = feedItem.approvalCount;
+                                global.allFeedItems[globalIndex].disapprovalCount = feedItem.disapprovalCount;
+                            }
+                            
+                            res.json({ success: true });
+                        } else {
+                            res.status(404).json({ error: 'Item not found' });
+                        }
+                    }).catch(err => {
+                        console.error(`DEBUG-VOTE-SERVER: Error: ${err}`);
+                        res.status(500).json({ error: 'Database error' });
+                    });
+                } else {
+                    res.status(400).json({ error: 'Missing feed item ID or vote data' });
+                }
+                break;
+
             // Find the 'get' case in the switch statement of the /feed endpoint
         case 'get':
             console.log("DEBUG-SERVER: Handling 'get' feed request");
