@@ -1791,7 +1791,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                                     global.allFeedItems.push(processedItem);
                                     console.log(`Item not found in global pool, adding as new`);
                                 }
-                                
+
                                 // Update in all sessions
                                 Object.keys(gameSessions).forEach(sessId => {
                                     const session = gameSessions[sessId];
@@ -1806,6 +1806,13 @@ app.post('/feed', validateApiKey, (req, res) => {
                                         // Preserve comment count if not in update
                                         if (!processedItem.commentCount && session.feedItems[sessionIndex].commentCount) {
                                             processedItem.commentCount = session.feedItems[sessionIndex].commentCount;
+                                        }
+                                        // Preserve vote counts from client update
+                                        if (feedItem.approvalCount !== undefined) {
+                                            processedItem.approvalCount = feedItem.approvalCount;
+                                        }
+                                        if (feedItem.disapprovalCount !== undefined) {
+                                            processedItem.disapprovalCount = feedItem.disapprovalCount;
                                         }
                                         
                                         // Update the item
@@ -1877,13 +1884,21 @@ app.post('/feed', validateApiKey, (req, res) => {
                             // Find and update in global array
                             const globalIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
                             if (globalIndex !== -1) {
+                                // Preserve vote counts from client update
+                                if (feedItem.approvalCount !== undefined) {
+                                    processedItem.approvalCount = feedItem.approvalCount;
+                                }
+                                if (feedItem.disapprovalCount !== undefined) {
+                                    processedItem.disapprovalCount = feedItem.disapprovalCount;
+                                }
+                                
                                 global.allFeedItems[globalIndex] = processedItem;
                                 console.log(`Updated item in global feed items pool (DB fallback)`);
                             } else {
                                 global.allFeedItems.push(processedItem);
                                 console.log(`Item not found in global pool, adding as new (DB fallback)`);
                             }
-                            
+
                             // Update in all sessions
                             Object.keys(gameSessions).forEach(sessId => {
                                 const session = gameSessions[sessId];
@@ -1891,6 +1906,14 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 
                                 const sessionIndex = session.feedItems.findIndex(item => item.id === processedItem.id);
                                 if (sessionIndex !== -1) {
+                                    // Preserve vote counts from client update
+                                    if (feedItem.approvalCount !== undefined) {
+                                        processedItem.approvalCount = feedItem.approvalCount;
+                                    }
+                                    if (feedItem.disapprovalCount !== undefined) {
+                                        processedItem.disapprovalCount = feedItem.disapprovalCount;
+                                    }
+                                    
                                     session.feedItems[sessionIndex] = processedItem;
                                 } else {
                                     session.feedItems.push(processedItem);
