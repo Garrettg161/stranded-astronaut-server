@@ -1776,7 +1776,13 @@ app.post('/feed', validateApiKey, (req, res) => {
                                     if (!processedItem.commentCount && global.allFeedItems[globalIndex].commentCount) {
                                         processedItem.commentCount = global.allFeedItems[globalIndex].commentCount;
                                     }
-                                    
+                                    // Preserve vote counts from client update
+                                    if (feedItem.approvalCount !== undefined) {
+                                        processedItem.approvalCount = feedItem.approvalCount;
+                                    }
+                                    if (feedItem.disapprovalCount !== undefined) {
+                                        processedItem.disapprovalCount = feedItem.disapprovalCount;
+                                    }
                                     // Update the item in the global pool
                                     global.allFeedItems[globalIndex] = processedItem;
                                     console.log(`Updated item in global feed items pool`);
