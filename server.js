@@ -1667,8 +1667,16 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItemId && feedItem) {
                     console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvals: ${feedItem.approvalCount}, disapprovals: ${feedItem.disapprovalCount}`);
                     
+                    // Try to find by id first, then by feedItemID if not found
+                    const findQuery = {
+                        $or: [
+                            { id: String(feedItemId) },
+                            { feedItemID: String(feedItemId) }
+                        ]
+                    };
+
                     FeedItem.findOneAndUpdate(
-                        { id: String(feedItemId) },
+                        findQuery,
                         {
                             approvalCount: feedItem.approvalCount,
                             disapprovalCount: feedItem.disapprovalCount
