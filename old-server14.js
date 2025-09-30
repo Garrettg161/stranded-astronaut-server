@@ -29,40 +29,34 @@ const feedItemSchema = new mongoose.Schema({
    organization: { type: String, default: 'Resistance' },
    timestamp: { type: Date, default: Date.now },
    imageUrl: String,
-   imageData: Buffer,
-   imageContentType: String,
    videoUrl: String,
-   videoData: Buffer,
-   videoContentType: String,
    audioUrl: String,
-   audioData: Buffer,
-   audioContentType: String,
    webUrl: String,
    parentId: String,
    feedItemID: { type: String, index: true },
-   commentCount: { type: Number, default: 0 },
-   approvalCount: { type: Number, default: 0 },
-   disapprovalCount: { type: Number, default: 0 },
-   isDirectMessage: { type: Boolean, default: false },
+    commentCount: { type: Number, default: 0 },
+    approvalCount: { type: Number, default: 0 },
+    disapprovalCount: { type: Number, default: 0 },
+    isDirectMessage: { type: Boolean, default: false },
    recipients: [String],
    isGroupMessage: { type: Boolean, default: false },
    groupName: String,
    topics: [String],
    attributedContentData: String,
    isDeleted: { type: Boolean, default: false },
-   isRepost: { type: Boolean, default: false },
-   metadata: mongoose.Schema.Types.Mixed,
-   eventDescription: String,
-   eventStartDate: Date,
-   eventEndDate: Date,
-   eventTime: String,
-   eventLocation: String,
-   eventZoomURL: String,
-   eventGoogleMeetURL: String,
-   eventSubstackURL: String,
-   eventStoredVideoURL: String,
-   hasCalendarPermission: { type: Boolean, default: false },
-   eventIdentifier: String
+   isRepost: { type: Boolean, default: false },  // ADD THIS LINE
+    metadata: mongoose.Schema.Types.Mixed,
+    eventDescription: String,
+    eventStartDate: Date,
+    eventEndDate: Date,
+    eventTime: String,
+    eventLocation: String,
+    eventZoomURL: String,
+    eventGoogleMeetURL: String,
+    eventSubstackURL: String,
+    eventStoredVideoURL: String,
+    hasCalendarPermission: { type: Boolean, default: false },
+    eventIdentifier: String
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
@@ -74,56 +68,6 @@ function loadItemsFromDatabase() {
            .then(items => {
                console.log(`Loaded ${items.length} feed items from MongoDB`);
                global.allFeedItems = items;
-               
-               // Rebuild global.mediaContent from stored binary data
-               let restoredImageCount = 0;
-               let restoredVideoCount = 0;
-               let restoredAudioCount = 0;
-               
-               items.forEach(item => {
-                   // Restore images
-                   if (item.imageData && item.imageUrl) {
-                       const mediaId = item.imageUrl.match(/\/media\/([^\/\?]+)/)?.[1];
-                       if (mediaId) {
-                           global.mediaContent[mediaId] = {
-                               type: 'image',
-                               data: item.imageData,
-                               contentType: item.imageContentType || 'image/jpeg'
-                           };
-                           restoredImageCount++;
-                       }
-                   }
-                   
-                   // Restore videos
-                   if (item.videoData && item.videoUrl) {
-                       const mediaId = item.videoUrl.match(/\/media\/([^\/\?]+)/)?.[1];
-                       if (mediaId) {
-                           global.mediaContent[mediaId] = {
-                               type: 'video',
-                               data: item.videoData,
-                               contentType: item.videoContentType || 'video/mp4'
-                           };
-                           restoredVideoCount++;
-                       }
-                   }
-                   
-                   // Restore audio
-                   if (item.audioData && item.audioUrl) {
-                       const mediaId = item.audioUrl.match(/\/media\/([^\/\?]+)/)?.[1];
-                       if (mediaId) {
-                           global.mediaContent[mediaId] = {
-                               type: 'audio',
-                               data: item.audioData,
-                               contentType: item.audioContentType || 'audio/mpeg'
-                           };
-                           restoredAudioCount++;
-                       }
-                   }
-               });
-               
-               console.log(`Restored ${restoredImageCount} images, ${restoredVideoCount} videos, ${restoredAudioCount} audio files to RAM`);
-               console.log(`Total media items in RAM: ${Object.keys(global.mediaContent).length}`);
-               
                resolve(items);
            })
            .catch(err => {
@@ -293,9 +237,11 @@ mongoose.connect(mongoUri, {
 }).then(() => {
  console.log('Connected to MongoDB database');
  
- // Load initial items AND rebuild media content
- return loadItemsFromDatabase();
+ // Load initial items
+ return FeedItem.find({ isDeleted: false });
 }).then(items => {
+ console.log(`Loaded ${items.length} feed items from MongoDB`);
+ global.allFeedItems = items;
  
  // Find the highest feedItemID to initialize the counter
  let maxId = 1000; // Default starting value
@@ -2260,22 +2206,16 @@ function processMediaContent(feedItem) {
                 const imgData = processDataUrl(processedItem.imageUrl);
                 
                 if (imgData) {
-                    const contentType = getContentTypeFromDataUrl(processedItem.imageUrl);
-                    
-                    // Store in RAM for immediate serving
+                    // Store the binary data
                     global.mediaContent[mediaId] = {
                         type: 'image',
                         data: imgData,
-                        contentType: contentType
+                        contentType: getContentTypeFromDataUrl(processedItem.imageUrl)
                     };
-                    
-                    // ALSO store in MongoDB for persistence
-                    processedItem.imageData = imgData;
-                    processedItem.imageContentType = contentType;
                     
                     // Replace data URL with a reference URL
                     processedItem.imageUrl = `/media/${mediaId}`;
-                    console.log(`Stored image in RAM and MongoDB: ${mediaId}, size: ${imgData.length} bytes`);
+                    console.log(`Processed image data for item ${mediaId}, size: ${imgData.length} bytes`);
                 }
             }
         }
@@ -2288,53 +2228,47 @@ function processMediaContent(feedItem) {
                 const videoData = processDataUrl(processedItem.videoUrl);
                 
                 if (videoData) {
-                    const contentType = getContentTypeFromDataUrl(processedItem.videoUrl);
-                    
-                    // Store in RAM for immediate serving
+                    // Store the binary data
                     global.mediaContent[mediaId] = {
                         type: 'video',
                         data: videoData,
-                        contentType: contentType
+                        contentType: getContentTypeFromDataUrl(processedItem.videoUrl)
                     };
-                    
-                    // ALSO store in MongoDB for persistence
-                    processedItem.videoData = videoData;
-                    processedItem.videoContentType = contentType;
                     
                     // Replace data URL with a reference URL
                     processedItem.videoUrl = `/media/${mediaId}`;
-                    console.log(`Stored video in RAM and MongoDB: ${mediaId}, size: ${videoData.length} bytes`);
+                    console.log(`Processed video data for item ${mediaId}, size: ${videoData.length} bytes`);
                 }
             }
         }
         
         // Handle audio data
         if (processedItem.type === 'audio' && processedItem.audioUrl) {
-            // Check if it's a data URL containing audio data
-            if (processedItem.audioUrl.startsWith('data:audio/')) {
-                const mediaId = uuidv4();
-                const audioData = processDataUrl(processedItem.audioUrl);
-                
-                if (audioData) {
-                    const contentType = getContentTypeFromDataUrl(processedItem.audioUrl);
-                    
-                    // Store in RAM for immediate serving
-                    global.mediaContent[mediaId] = {
-                        type: 'audio',
-                        data: audioData,
-                        contentType: contentType
-                    };
-                    
-                    // ALSO store in MongoDB for persistence
-                    processedItem.audioData = audioData;
-                    processedItem.audioContentType = contentType;
-                    
-                    // Replace data URL with a reference URL
-                    processedItem.audioUrl = `/media/${mediaId}`;
-                    console.log(`Stored audio in RAM and MongoDB: ${mediaId}, size: ${audioData.length} bytes`);
-                }
-            }
-        }
+                   // Check if it's a data URL containing audio data
+                   if (processedItem.audioUrl.startsWith('data:audio/')) {
+                       const mediaId = uuidv4();
+                       const audioData = processDataUrl(processedItem.audioUrl);
+                       
+                       if (audioData) {
+                           // Store the binary data
+                           global.mediaContent[mediaId] = {
+                               type: 'audio',
+                               data: audioData,
+                               contentType: getContentTypeFromDataUrl(processedItem.audioUrl)
+                           };
+                           
+                           // Replace data URL with a reference URL
+                           processedItem.audioUrl = `/media/${mediaId}`;
+                           console.log(`Processed audio data for item ${mediaId}, size: ${audioData.length} bytes`);
+                       }
+                   }
+               }
+           } catch (error) {
+               console.error(`Error processing media content: ${error.message}`);
+           }
+           
+           return processedItem;
+       }
 
        // Extract binary data from a data URL
        function processDataUrl(dataUrl) {
