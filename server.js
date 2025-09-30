@@ -2335,120 +2335,126 @@ function processMediaContent(feedItem) {
                 }
             }
         }
+    } catch (error) {
+        console.error(`Error processing media content: ${error.message}`);
+    }
+    
+    return processedItem;
+}
 
-       // Extract binary data from a data URL
-       function processDataUrl(dataUrl) {
-           try {
-               // Format: "data:image/jpeg;base64,/9j/4AAQSkZJRgABA..."
-               const matches = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-               if (!matches || matches.length !== 3) {
-                   console.error('Invalid data URL format');
-                   return null;
-               }
-               
-               const base64Data = matches[2];
-               const binaryData = Buffer.from(base64Data, 'base64');
-               
-               // Check size limit
-               if (binaryData.length > MAX_MEDIA_SIZE) {
-                   console.error(`Media exceeds size limit of ${MAX_MEDIA_SIZE} bytes`);
-                   return null;
-               }
-               
-               return binaryData;
-           } catch (error) {
-               console.error(`Error processing data URL: ${error.message}`);
+// Extract binary data from a data URL
+function processDataUrl(dataUrl) {
+       try {
+           // Format: "data:image/jpeg;base64,/9j/4AAQSkZJRgABA..."
+           const matches = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+           if (!matches || matches.length !== 3) {
+               console.error('Invalid data URL format');
                return null;
            }
+           
+           const base64Data = matches[2];
+           const binaryData = Buffer.from(base64Data, 'base64');
+           
+           // Check size limit
+           if (binaryData.length > MAX_MEDIA_SIZE) {
+               console.error(`Media exceeds size limit of ${MAX_MEDIA_SIZE} bytes`);
+               return null;
+           }
+           
+           return binaryData;
+       } catch (error) {
+           console.error(`Error processing data URL: ${error.message}`);
+           return null;
        }
+   }
 
-       // Extract content type from data URL
-       function getContentTypeFromDataUrl(dataUrl) {
-           const matches = dataUrl.match(/^data:([^;]+);/);
-           return matches && matches.length >= 2 ? matches[1] : 'application/octet-stream';
-       }
+   // Extract content type from data URL
+   function getContentTypeFromDataUrl(dataUrl) {
+       const matches = dataUrl.match(/^data:([^;]+);/);
+       return matches && matches.length >= 2 ? matches[1] : 'application/octet-stream';
+   }
 
-       // Media cleanup function to prevent memory leaks
-       function cleanupUnusedMedia() {
-           console.log(`Starting media cleanup. Current media items: ${Object.keys(global.mediaContent).length}`);
-           
-           // Get all media IDs currently in use
-           const usedMediaIds = new Set();
-           
-           // Check feed items for media references
-           if (global.allFeedItems) {
-               global.allFeedItems.forEach(item => {
-                   // Check image URLs
-                   if (item.type === 'image' && item.imageUrl) {
-                       const match = item.imageUrl.match(/\/media\/([^\/\?]+)/);
-                       if (match && match[1]) {
-                           usedMediaIds.add(match[1]);
-                       }
+   // Media cleanup function to prevent memory leaks
+   function cleanupUnusedMedia() {
+       console.log(`Starting media cleanup. Current media items: ${Object.keys(global.mediaContent).length}`);
+       
+       // Get all media IDs currently in use
+       const usedMediaIds = new Set();
+       
+       // Check feed items for media references
+       if (global.allFeedItems) {
+           global.allFeedItems.forEach(item => {
+               // Check image URLs
+               if (item.type === 'image' && item.imageUrl) {
+                   const match = item.imageUrl.match(/\/media\/([^\/\?]+)/);
+                   if (match && match[1]) {
+                       usedMediaIds.add(match[1]);
                    }
-                   
-                   // Check video URLs
-                   if (item.type === 'video' && item.videoUrl) {
-                       const match = item.videoUrl.match(/\/media\/([^\/\?]+)/);
-                       if (match && match[1]) {
-                           usedMediaIds.add(match[1]);
-                       }
+               }
+               
+               // Check video URLs
+               if (item.type === 'video' && item.videoUrl) {
+                   const match = item.videoUrl.match(/\/media\/([^\/\?]+)/);
+                   if (match && match[1]) {
+                       usedMediaIds.add(match[1]);
                    }
-                   
-                   // Check audio URLs
-                   if (item.type === 'audio' && item.audioUrl) {
-                       const match = item.audioUrl.match(/\/media\/([^\/\?]+)/);
-                       if (match && match[1]) {
-                           usedMediaIds.add(match[1]);
-                       }
+               }
+               
+               // Check audio URLs
+               if (item.type === 'audio' && item.audioUrl) {
+                   const match = item.audioUrl.match(/\/media\/([^\/\?]+)/);
+                   if (match && match[1]) {
+                       usedMediaIds.add(match[1]);
                    }
-               });
-           }
-           
-           // Check direct messages for media references
-           if (global.directMessages) {
-               Object.values(global.directMessages).forEach(messages => {
-                   messages.forEach(message => {
-                       if (message.content && typeof message.content === 'string') {
-                           const match = message.content.match(/\/media\/([^\/\?]+)/);
-                           if (match && match[1]) {
-                               usedMediaIds.add(match[1]);
-                           }
-                       }
-                   });
-               });
-           }
-           
-           // Check pending direct messages for media references
-           if (global.pendingDirectMessages) {
-               Object.values(global.pendingDirectMessages).forEach(messages => {
-                   messages.forEach(message => {
-                       if (message.content && typeof message.content === 'string') {
-                           const match = message.content.match(/\/media\/([^\/\?]+)/);
-                           if (match && match[1]) {
-                               usedMediaIds.add(match[1]);
-                           }
-                       }
-                   });
-               });
-           }
-           
-           // Identify unused media items for removal
-           const allMediaIds = Object.keys(global.mediaContent);
-           const unusedMediaIds = allMediaIds.filter(id => !usedMediaIds.has(id));
-           
-           // Remove unused media
-           unusedMediaIds.forEach(id => {
-               delete global.mediaContent[id];
+               }
            });
-           
-           console.log(`Media cleanup complete. Removed ${unusedMediaIds.length} unused items. Remaining: ${Object.keys(global.mediaContent).length}`);
        }
-
-       // Start the server
-       app.listen(port, () => {
-           console.log(`Stranded Astronaut Multiplayer Server v2.3 with Resistance Feed Support running on port ${port}`);
-           console.log(`Server initialized with ${global.allFeedItems ? global.allFeedItems.length : 0} global feed items`);
-           
-           // Set up periodic media cleanup (run every hour)
-           setInterval(cleanupUnusedMedia, 60 * 60 * 1000);
+       
+       // Check direct messages for media references
+       if (global.directMessages) {
+           Object.values(global.directMessages).forEach(messages => {
+               messages.forEach(message => {
+                   if (message.content && typeof message.content === 'string') {
+                       const match = message.content.match(/\/media\/([^\/\?]+)/);
+                       if (match && match[1]) {
+                           usedMediaIds.add(match[1]);
+                       }
+                   }
+               });
+           });
+       }
+       
+       // Check pending direct messages for media references
+       if (global.pendingDirectMessages) {
+           Object.values(global.pendingDirectMessages).forEach(messages => {
+               messages.forEach(message => {
+                   if (message.content && typeof message.content === 'string') {
+                       const match = message.content.match(/\/media\/([^\/\?]+)/);
+                       if (match && match[1]) {
+                           usedMediaIds.add(match[1]);
+                       }
+                   }
+               });
+           });
+       }
+       
+       // Identify unused media items for removal
+       const allMediaIds = Object.keys(global.mediaContent);
+       const unusedMediaIds = allMediaIds.filter(id => !usedMediaIds.has(id));
+       
+       // Remove unused media
+       unusedMediaIds.forEach(id => {
+           delete global.mediaContent[id];
        });
+       
+       console.log(`Media cleanup complete. Removed ${unusedMediaIds.length} unused items. Remaining: ${Object.keys(global.mediaContent).length}`);
+   }
+
+   // Start the server
+   app.listen(port, () => {
+       console.log(`Stranded Astronaut Multiplayer Server v2.3 with Resistance Feed Support running on port ${port}`);
+       console.log(`Server initialized with ${global.allFeedItems ? global.allFeedItems.length : 0} global feed items`);
+       
+       // Set up periodic media cleanup (run every hour)
+       setInterval(cleanupUnusedMedia, 60 * 60 * 1000);
+   });
