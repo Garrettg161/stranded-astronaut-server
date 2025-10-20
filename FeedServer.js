@@ -1764,14 +1764,12 @@ app.post('/feed', validateApiKey, (req, res) => {
 
             // Find the 'get' case in the switch statement of the /feed endpoint
         case 'get':
-            console.log("DEBUG-SYNC-SERVER: Handling 'get' feed request");
+            console.log("DEBUG-SERVER: Handling 'get' feed request");
             
             // Try to get items from MongoDB first
-            // CRITICAL FIX: Exclude large binary fields to prevent OOM on Android
             FeedItem.find({ isDeleted: false })
-                .select('-attributedContentData -imageData -videoData -audioData')
                 .then(items => {
-                    console.log(`DEBUG-SYNC-COMMENT-SERVER: Calculating comment counts for all ${items.length} items`);
+                    console.log(`DEBUG-COMMENT-SERVER: Calculating comment counts for all ${items.length} items`);
                     
                     // Update the global feed items from the database
                     global.allFeedItems = items;
@@ -1786,7 +1784,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     console.error(`Error getting items from MongoDB: ${err}`);
                     
                     // Fallback to memory if DB fails
-                    console.log(`DEBUG-SYNC-COMMENT-SERVER: Calculating comment counts for all ${global.allFeedItems.length} items`);
+                    console.log(`DEBUG-COMMENT-SERVER: Calculating comment counts for all ${global.allFeedItems.length} items`);
                     
                     // Deduplicate items by ID
                     const uniqueItems = [];
