@@ -62,11 +62,7 @@ const feedItemSchema = new mongoose.Schema({
    eventSubstackURL: String,
    eventStoredVideoURL: String,
    hasCalendarPermission: { type: Boolean, default: false },
-   eventIdentifier: String,
-   // Encryption fields
-   encryptedData: Buffer,
-   encryptionStatus: { type: String, default: 'legacy' },
-   encryptedMessageId: String
+   eventIdentifier: String
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
