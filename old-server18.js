@@ -3,7 +3,6 @@ const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const signalProtocol = require('./server-signal');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -2292,14 +2291,6 @@ app.get('/media/:id', (req, res) => {
     res.setHeader('Content-Length', media.data.length);
     res.send(media.data);
 });
-
-// Signal Protocol endpoints
-app.post('/api/signal/keys/upload', validateApiKey, signalProtocol.uploadKeyBundle);
-app.get('/api/signal/keys/:username', validateApiKey, signalProtocol.fetchKeyBundle);
-app.post('/api/signal/messages', validateApiKey, signalProtocol.storeEncryptedMessage);
-app.get('/api/signal/messages/:feedItemId', validateApiKey, signalProtocol.fetchEncryptedMessage);
-app.get('/api/signal/keys/:username/prekey-count', validateApiKey, signalProtocol.getPreKeyCount);
-console.log('DEBUG-SIGNAL-SERVER: Signal Protocol endpoints registered');
 
 // Default game facts
 function getDefaultGameFacts() {
