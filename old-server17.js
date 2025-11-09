@@ -1255,7 +1255,11 @@ app.post('/directMessages', validateApiKey, (req, res) => {
                     content: processedContent,
                     contentType: processedContentType,
                     timestamp: new Date().toISOString(),
-                    read: false
+                    read: false,
+                    // Encryption fields
+                    encryptedData: message.encryptedData || null,
+                    encryptionStatus: message.encryptionStatus || 'legacy',
+                    encryptedMessageId: message.encryptedMessageId || null
                 };
                 
                 // Store for each recipient
@@ -1424,7 +1428,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // ADD THIS: Preserve isRepost property
                     if (feedItem.isRepost) {
                         processedItem.isRepost = true;
-                        console.log(`DEBUG-REPOST: Publishing item with isRepost=true`);
+                        // Publishing item with isRepost=true
                     }
                 } catch (error) {
                     console.error("Error processing item:", error);
@@ -1441,7 +1445,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItem.parentId) {
                     // Always store parentId as received without modification
                     processedItem.parentId = feedItem.parentId;
-                    console.log(`DEBUG-COMMENT-SERVER: Item is a comment with parentId: ${feedItem.parentId}`);
+                    // Item is a comment
                     
                     // Update parent's comment count in MongoDB first
                     // FIXED: Look up parent by id instead of feedItemID
@@ -1451,7 +1455,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                         { new: true }
                     ).then(updatedParent => {
                         if (updatedParent) {
-                            console.log(`DEBUG-COMMENT-SERVER: Updated parent in DB with comment count: ${updatedParent.commentCount}`);
+                            // Updated parent in DB
                             
                             // Also update parent in memory
                             // FIXED: Look up parent by id instead of feedItemID
@@ -1464,7 +1468,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                                     global.allFeedItems[parentIndex].commentCount = 0;
                                 }
                                 global.allFeedItems[parentIndex].commentCount = updatedParent.commentCount;
-                                console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory with count: ${updatedParent.commentCount}`);
+                                // Updated parent in memory
                             }
                         }
                     }).catch(err => {
@@ -1481,7 +1485,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 global.allFeedItems[parentIndex].commentCount = 0;
                             }
                             global.allFeedItems[parentIndex].commentCount += 1;
-                            console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory only with count: ${global.allFeedItems[parentIndex].commentCount}`);
+                            // Updated parent in memory only
                         }
                     });
                 }
@@ -1522,15 +1526,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                         }
                     }
                     
-                    // CRITICAL FIX: Convert encryptedData Buffer to base64 for JSON transmission
-                    const itemForTransmission = { ...processedItem };
-                    if (itemForTransmission.encryptedData && Buffer.isBuffer(itemForTransmission.encryptedData)) {
-                        itemForTransmission.encryptedData = itemForTransmission.encryptedData.toString('base64');
-                        console.log(`DEBUG-ENCRYPTION-SERVER: Converting encryptedData to base64 for transmission`);
-                    }
-                    
                     // Also create a message to notify all users
-                    const messageContent = `FEED_ITEM:${JSON.stringify(itemForTransmission)}`;
+                    const messageContent = `FEED_ITEM:${JSON.stringify(processedItem)}`;
                     
                     // Add to all active sessions for propagation
                     Object.keys(gameSessions).forEach(sessId => {
@@ -1649,7 +1646,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     if (feedItemId && typeof commentCount === 'number') {
 
                         // Add this to the beginning of the updateCommentCount case:
-                        console.log(`DEBUG-SERVER-COMMENT: Received request to update comment count for ${feedItemId} to ${commentCount}`);
+                        // Updating comment count
                         // Update in MongoDB
                         FeedItem.findOneAndUpdate(
                             { id: String(feedItemId) },
@@ -1730,7 +1727,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     break;
             case 'updateVoteCount':
                 if (feedItemId && feedItem) {
-                    console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvals: ${feedItem.approvalCount}, disapprovals: ${feedItem.disapprovalCount}`);
+                    // Updating votes
                     
                     // Try to find by id first, then by feedItemID if not found
                     const findQuery = {
@@ -1749,7 +1746,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                         { new: true }
                     ).then(updatedItem => {
                         if (updatedItem) {
-                            console.log(`DEBUG-VOTE-SERVER: Votes updated in MongoDB`);
+                            // Votes updated in MongoDB
                             
                             const globalIndex = global.allFeedItems.findIndex(item =>
                                 String(item.id) === String(feedItemId)
@@ -1775,42 +1772,28 @@ app.post('/feed', validateApiKey, (req, res) => {
 
             // Find the 'get' case in the switch statement of the /feed endpoint
         case 'get':
-            console.log("DEBUG-SYNC-SERVER: Handling 'get' feed request");
             
             // Try to get items from MongoDB first
             // CRITICAL FIX: Exclude large binary fields to prevent OOM on Android
             FeedItem.find({ isDeleted: false })
                 .select('-attributedContentData -imageData -videoData -audioData')
                 .then(items => {
-                    console.log(`DEBUG-SYNC-COMMENT-SERVER: Calculating comment counts for all ${items.length} items`);
+                    // Calculate comment counts
                     
                     // Update the global feed items from the database
                     global.allFeedItems = items;
                     
-                    // CRITICAL FIX: Convert encryptedData Buffer to base64 string for transmission
-                    const itemsForTransmission = items.map(item => {
-                        const itemObj = item.toObject();
-                        
-                        // Convert encryptedData Buffer to base64 string
-                        if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
-                            itemObj.encryptedData = itemObj.encryptedData.toString('base64');
-                            console.log(`DEBUG-ENCRYPTION-SERVER: Converting encryptedData to base64 for item ${itemObj.id}`);
-                        }
-                        
-                        return itemObj;
-                    });
-                    
-                    // Return the transformed items
+                    // Return the items from database
                     res.json({
                         success: true,
-                        feedItems: itemsForTransmission
+                        feedItems: items
                     });
                 })
                 .catch(err => {
                     console.error(`Error getting items from MongoDB: ${err}`);
                     
                     // Fallback to memory if DB fails
-                    console.log(`DEBUG-SYNC-COMMENT-SERVER: Calculating comment counts for all ${global.allFeedItems.length} items`);
+                    // Calculate comment counts
                     
                     // Deduplicate items by ID
                     const uniqueItems = [];
@@ -1819,14 +1802,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     for (const item of global.allFeedItems) {
                         if (!seenIds.has(item.id)) {
                             seenIds.add(item.id);
-                            
-                            // Convert encryptedData if present
-                            const itemForTransmission = { ...item };
-                            if (itemForTransmission.encryptedData && Buffer.isBuffer(itemForTransmission.encryptedData)) {
-                                itemForTransmission.encryptedData = itemForTransmission.encryptedData.toString('base64');
-                            }
-                            
-                            uniqueItems.push(itemForTransmission);
+                            uniqueItems.push(item);
                         }
                     }
                     
@@ -1850,47 +1826,25 @@ app.post('/feed', validateApiKey, (req, res) => {
                         // CRITICAL FIX: Preserve parentId during updates
                         if (feedItem.parentId) {
                             processedItem.parentId = feedItem.parentId;
-                            console.log(`DEBUG-COMMENT-SERVER: Updated item has parentId: ${feedItem.parentId}`);
+                            // Preserved parentId during update
                         }
                         
                         // ADDED: Preserve isRepost during updates
                         if (feedItem.isRepost !== undefined) {
                             processedItem.isRepost = feedItem.isRepost;
-                            console.log(`DEBUG-REPOST: Updating item with isRepost=${feedItem.isRepost}`);
-                        }
-                        
-                        // CRITICAL: Explicitly preserve encryption fields during updates
-                        // (processMediaContent should handle this, but being explicit for safety)
-                        if (feedItem.encryptionStatus) {
-                            processedItem.encryptionStatus = feedItem.encryptionStatus;
-                            console.log(`DEBUG-ENCRYPTION-SERVER: Preserving encryptionStatus: ${feedItem.encryptionStatus}`);
-                        }
-                        if (feedItem.encryptedMessageId) {
-                            processedItem.encryptedMessageId = feedItem.encryptedMessageId;
-                            console.log(`DEBUG-ENCRYPTION-SERVER: Preserving encryptedMessageId: ${feedItem.encryptedMessageId}`);
-                        }
-                        if (feedItem.encryptedData) {
-                            // Already handled by processMediaContent, but double-check
-                            if (!processedItem.encryptedData) {
-                                if (typeof feedItem.encryptedData === 'string') {
-                                    processedItem.encryptedData = Buffer.from(feedItem.encryptedData, 'base64');
-                                } else if (Buffer.isBuffer(feedItem.encryptedData)) {
-                                    processedItem.encryptedData = feedItem.encryptedData;
-                                }
-                                console.log(`DEBUG-ENCRYPTION-SERVER: Explicitly preserved encryptedData`);
-                            }
+                            // Preserved isRepost during update
                         }
                         
                         // ADD THIS: Preserve ALL Event-specific fields during updates
                         if (feedItem.type === 'event') {
-                            console.log(`DEBUG-SERVER-EVENT: Preserving Event fields for update`);
+                            // Preserving Event fields for update
                             
                             processedItem.eventDescription = feedItem.eventDescription;
                             
                             // CRITICAL: Preserve Event dates
                             if (feedItem.eventStartDate) {
                                 processedItem.eventStartDate = new Date(feedItem.eventStartDate);
-                                console.log(`DEBUG-SERVER-EVENT: Preserved eventStartDate: ${processedItem.eventStartDate}`);
+                                // Preserved eventStartDate
                             }
                             if (feedItem.eventEndDate) {
                                 processedItem.eventEndDate = new Date(feedItem.eventEndDate);
@@ -1977,13 +1931,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                                         console.log(`Item not found in session ${sessId}, adding`);
                                     }
                                     
-                                    // CRITICAL FIX: Convert encryptedData Buffer to base64 for transmission
-                                    const itemForTransmission = { ...processedItem };
-                                    if (itemForTransmission.encryptedData && Buffer.isBuffer(itemForTransmission.encryptedData)) {
-                                        itemForTransmission.encryptedData = itemForTransmission.encryptedData.toString('base64');
-                                        console.log(`DEBUG-ENCRYPTION-SERVER: Converting encryptedData to base64 for update transmission`);
-                                    }
-                                    
                                     // Create an update notification for each session
                                     const updateMessage = {
                                         id: uuidv4(),
@@ -1991,7 +1938,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                                         senderId: playerId,
                                         senderName: gameSessions[sessionId].players[playerId].name,
                                         targetId: null,
-                                        content: `UPDATE_FEED_ITEM:${JSON.stringify(itemForTransmission)}`,
+                                        content: `UPDATE_FEED_ITEM:${JSON.stringify(processedItem)}`,
                                         timestamp: new Date().getTime(),
                                         isSystemMessage: false
                                     };
@@ -2311,25 +2258,7 @@ function getDefaultGameFacts() {
 // Process media content in feed items
 function processMediaContent(feedItem) {
     // Make a copy of the item to avoid modifying the original
-    // CRITICAL FIX: Use a proper deep copy that preserves Buffer fields
     const processedItem = { ...feedItem };
-    
-    // CRITICAL: Explicitly preserve encryption fields
-    if (feedItem.encryptionStatus) {
-        processedItem.encryptionStatus = feedItem.encryptionStatus;
-    }
-    if (feedItem.encryptedMessageId) {
-        processedItem.encryptedMessageId = feedItem.encryptedMessageId;
-    }
-    if (feedItem.encryptedData) {
-        // Convert base64 string to Buffer for storage
-        if (typeof feedItem.encryptedData === 'string') {
-            processedItem.encryptedData = Buffer.from(feedItem.encryptedData, 'base64');
-            console.log(`DEBUG-ENCRYPTION-SERVER: Converted encryptedData from base64 to Buffer, size: ${processedItem.encryptedData.length} bytes`);
-        } else if (Buffer.isBuffer(feedItem.encryptedData)) {
-            processedItem.encryptedData = feedItem.encryptedData;
-        }
-    }
     
     try {
         // Handle image data
