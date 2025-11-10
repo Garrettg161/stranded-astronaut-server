@@ -2633,6 +2633,80 @@ function processDataUrl(dataUrl) {
        console.log(`Media cleanup complete. Removed ${unusedMediaIds.length} unused items. Remaining: ${Object.keys(global.mediaContent).length}`);
    }
 
+// ====================
+// SIGNAL PROTOCOL ENDPOINTS
+// ====================
+
+// Store Signal key bundles in memory
+if (!global.signalKeys) {
+    global.signalKeys = {};
+}
+
+// Upload Signal key bundle
+app.post('/signal/upload-keys', validateApiKey, (req, res) => {
+    const { username, keyBundle } = req.body;
+    
+    if (!username || !keyBundle) {
+        return res.status(400).json({ error: 'Missing username or keyBundle' });
+    }
+    
+    // Validate key bundle structure
+    if (!keyBundle.registrationId || !keyBundle.deviceId || !keyBundle.identityKey ||
+        !keyBundle.signedPreKeyId || !keyBundle.signedPreKeyPublic || !keyBundle.signedPreKeySignature ||
+        !keyBundle.preKeys || !Array.isArray(keyBundle.preKeys)) {
+        return res.status(400).json({ error: 'Invalid key bundle structure' });
+    }
+    
+    // Store the key bundle
+    global.signalKeys[username] = {
+        ...keyBundle,
+        uploadedAt: new Date().toISOString()
+    };
+    
+    console.log(`DEBUG-SIGNAL-SERVER: Uploaded key bundle for ${username}`);
+    console.log(`DEBUG-SIGNAL-SERVER: Registration ID: ${keyBundle.registrationId}, Device ID: ${keyBundle.deviceId}`);
+    console.log(`DEBUG-SIGNAL-SERVER: PreKeys count: ${keyBundle.preKeys.length}`);
+    
+    res.json({
+        success: true,
+        message: 'Key bundle uploaded successfully',
+        username: username
+    });
+});
+
+// Download Signal key bundle for a user
+app.get('/signal/keys/:username', validateApiKey, (req, res) => {
+    const { username } = req.params;
+    
+    if (!username) {
+        return res.status(400).json({ error: 'Missing username' });
+    }
+    
+    // Retrieve key bundle
+    const keyBundle = global.signalKeys[username];
+    
+    if (!keyBundle) {
+        console.log(`DEBUG-SIGNAL-SERVER: Key bundle not found for user: ${username}`);
+        return res.status(404).json({ error: 'Key bundle not found for user' });
+    }
+    
+    console.log(`DEBUG-SIGNAL-SERVER: Retrieved key bundle for ${username}`);
+    
+    // Return the key bundle (without the uploadedAt timestamp)
+    const { uploadedAt, ...bundle } = keyBundle;
+    res.json(bundle);
+});
+
+// Debug endpoint to list all users with uploaded keys
+app.get('/signal/keys', validateApiKey, (req, res) => {
+    const users = Object.keys(global.signalKeys);
+    res.json({
+        success: true,
+        users: users,
+        count: users.length
+    });
+});
+
    // Start the server
    app.listen(port, () => {
        console.log(`Stranded Astronaut Multiplayer Server v2.3 with Resistance Feed Support running on port ${port}`);
