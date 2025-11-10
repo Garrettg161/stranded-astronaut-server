@@ -3,6 +3,7 @@ const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const signalProtocol = require('./server-signal');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -70,24 +71,6 @@ const feedItemSchema = new mongoose.Schema({
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
-
-// Signal Protocol key bundle schema
-const signalKeyBundleSchema = new mongoose.Schema({
-   username: { type: String, required: true, unique: true, index: true },
-   registrationId: { type: Number, required: true },
-   deviceId: { type: Number, required: true },
-   identityKey: { type: String, required: true }, // Base64 encoded
-   signedPreKeyId: { type: Number, required: true },
-   signedPreKeyPublic: { type: String, required: true }, // Base64 encoded
-   signedPreKeySignature: { type: String, required: true }, // Base64 encoded
-   preKeys: [{
-      id: { type: Number, required: true },
-      publicKey: { type: String, required: true } // Base64 encoded
-   }],
-   updatedAt: { type: Date, default: Date.now }
-});
-
-const SignalKeyBundle = mongoose.model('SignalKeyBundle', signalKeyBundleSchema);
 
 // Function to load items from MongoDB at startup
 function loadItemsFromDatabase() {
@@ -843,7 +826,7 @@ app.post('/updateLocation', validateApiKey, (req, res) => {
     player.currentLocation = locationId;
     player.lastActivity = new Date();
     
-    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} Ã¢â€ â€™ ${locationId}`);
+    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} â†’ ${locationId}`);
     
     res.json({
         success: true,
@@ -1394,91 +1377,6 @@ app.post('/directMessages', validateApiKey, (req, res) => {
             
         default:
             res.status(400).json({ error: 'Unknown action' });
-    }
-});
-
-// ========================================
-// SIGNAL PROTOCOL ENDPOINTS
-// ========================================
-
-// Upload Signal key bundle
-app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
-    try {
-        const { username, keyBundle } = req.body;
-        
-        if (!username || !keyBundle) {
-            return res.status(400).json({ error: 'Missing username or keyBundle' });
-        }
-        
-        // Validate key bundle structure
-        if (!keyBundle.registrationId || !keyBundle.deviceId || !keyBundle.identityKey ||
-            !keyBundle.signedPreKeyId || !keyBundle.signedPreKeyPublic || !keyBundle.signedPreKeySignature ||
-            !keyBundle.preKeys || !Array.isArray(keyBundle.preKeys)) {
-            return res.status(400).json({ error: 'Invalid key bundle structure' });
-        }
-        
-        console.log(`DEBUG-SIGNAL: Uploading keys for ${username}, preKeys count: ${keyBundle.preKeys.length}`);
-        
-        // Upsert the key bundle (update if exists, insert if new)
-        await SignalKeyBundle.findOneAndUpdate(
-            { username: username },
-            {
-                username: username,
-                registrationId: keyBundle.registrationId,
-                deviceId: keyBundle.deviceId,
-                identityKey: keyBundle.identityKey,
-                signedPreKeyId: keyBundle.signedPreKeyId,
-                signedPreKeyPublic: keyBundle.signedPreKeyPublic,
-                signedPreKeySignature: keyBundle.signedPreKeySignature,
-                preKeys: keyBundle.preKeys,
-                updatedAt: new Date()
-            },
-            { upsert: true, new: true }
-        );
-        
-        console.log(`DEBUG-SIGNAL: Successfully stored key bundle for ${username}`);
-        res.json({ success: true, message: 'Key bundle uploaded successfully' });
-        
-    } catch (error) {
-        console.error(`ERROR uploading Signal keys: ${error}`);
-        res.status(500).json({ error: 'Failed to upload key bundle', details: error.message });
-    }
-});
-
-// Get Signal key bundle for a user
-app.get('/signal/keys/:username', validateApiKey, async (req, res) => {
-    try {
-        const { username } = req.params;
-        
-        if (!username) {
-            return res.status(400).json({ error: 'Missing username' });
-        }
-        
-        console.log(`DEBUG-SIGNAL: Fetching keys for ${username}`);
-        
-        const keyBundle = await SignalKeyBundle.findOne({ username: username });
-        
-        if (!keyBundle) {
-            return res.status(404).json({ error: 'Key bundle not found for user' });
-        }
-        
-        // Return the key bundle
-        const response = {
-            registrationId: keyBundle.registrationId,
-            deviceId: keyBundle.deviceId,
-            identityKey: keyBundle.identityKey,
-            signedPreKeyId: keyBundle.signedPreKeyId,
-            signedPreKeyPublic: keyBundle.signedPreKeyPublic,
-            signedPreKeySignature: keyBundle.signedPreKeySignature,
-            preKeys: keyBundle.preKeys
-        };
-        
-        console.log(`DEBUG-SIGNAL: Returning key bundle for ${username}, preKeys count: ${response.preKeys.length}`);
-        res.json(response);
-        
-    } catch (error) {
-        console.error(`ERROR fetching Signal keys: ${error}`);
-        res.status(500).json({ error: 'Failed to fetch key bundle', details: error.message });
     }
 });
 
@@ -2394,6 +2292,14 @@ app.get('/media/:id', (req, res) => {
     res.setHeader('Content-Length', media.data.length);
     res.send(media.data);
 });
+
+// Signal Protocol endpoints
+app.post('/api/signal/keys/upload', validateApiKey, signalProtocol.uploadKeyBundle);
+app.get('/api/signal/keys/:username', validateApiKey, signalProtocol.fetchKeyBundle);
+app.post('/api/signal/messages', validateApiKey, signalProtocol.storeEncryptedMessage);
+app.get('/api/signal/messages/:feedItemId', validateApiKey, signalProtocol.fetchEncryptedMessage);
+app.get('/api/signal/keys/:username/prekey-count', validateApiKey, signalProtocol.getPreKeyCount);
+console.log('DEBUG-SIGNAL-SERVER: Signal Protocol endpoints registered');
 
 // Default game facts
 function getDefaultGameFacts() {
