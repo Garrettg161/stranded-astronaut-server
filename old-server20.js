@@ -80,9 +80,6 @@ const signalKeyBundleSchema = new mongoose.Schema({
    signedPreKeyId: { type: Number, required: true },
    signedPreKeyPublic: { type: String, required: true }, // Base64 encoded
    signedPreKeySignature: { type: String, required: true }, // Base64 encoded
-   kyberPreKeyId: { type: Number, required: false }, // Kyber post-quantum key ID
-   kyberPreKeyPublic: { type: String, required: false }, // Base64 encoded Kyber public key
-   kyberPreKeySignature: { type: String, required: false }, // Base64 encoded signature
    preKeys: [{
       id: { type: Number, required: true },
       publicKey: { type: String, required: true } // Base64 encoded
@@ -1433,9 +1430,6 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
                 signedPreKeyId: keyBundle.signedPreKeyId,
                 signedPreKeyPublic: keyBundle.signedPreKeyPublic,
                 signedPreKeySignature: keyBundle.signedPreKeySignature,
-                kyberPreKeyId: keyBundle.kyberPreKeyId,
-                kyberPreKeyPublic: keyBundle.kyberPreKeyPublic,
-                kyberPreKeySignature: keyBundle.kyberPreKeySignature,
                 preKeys: keyBundle.preKeys,
                 updatedAt: new Date()
             },
@@ -1476,9 +1470,6 @@ app.get('/signal/keys/:username', validateApiKey, async (req, res) => {
             signedPreKeyId: keyBundle.signedPreKeyId,
             signedPreKeyPublic: keyBundle.signedPreKeyPublic,
             signedPreKeySignature: keyBundle.signedPreKeySignature,
-            kyberPreKeyId: keyBundle.kyberPreKeyId,
-            kyberPreKeyPublic: keyBundle.kyberPreKeyPublic,
-            kyberPreKeySignature: keyBundle.kyberPreKeySignature,
             preKeys: keyBundle.preKeys
         };
         
