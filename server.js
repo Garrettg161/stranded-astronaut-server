@@ -846,7 +846,7 @@ app.post('/updateLocation', validateApiKey, (req, res) => {
     player.currentLocation = locationId;
     player.lastActivity = new Date();
     
-    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} Ã¢â€ â€™ ${locationId}`);
+    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ ${locationId}`);
     
     res.json({
         success: true,
@@ -2714,6 +2714,38 @@ app.get('/signal/keys', validateApiKey, (req, res) => {
         users: users,
         count: users.length
     });
+});
+
+// Cleanup endpoint to delete old encrypted test messages
+app.delete('/signal/cleanup-encrypted-messages', validateApiKey, async (req, res) => {
+    try {
+        console.log('DEBUG-CLEANUP: Deleting old encrypted test messages...');
+        
+        // Delete all feed items with encryptionStatus: "encrypted"
+        const result = await FeedItem.deleteMany({ encryptionStatus: 'encrypted' });
+        
+        console.log(`DEBUG-CLEANUP: Deleted ${result.deletedCount} encrypted messages`);
+        
+        // Also clear from memory
+        if (global.allFeedItems) {
+            const beforeCount = global.allFeedItems.length;
+            global.allFeedItems = global.allFeedItems.filter(item => item.encryptionStatus !== 'encrypted');
+            const afterCount = global.allFeedItems.length;
+            console.log(`DEBUG-CLEANUP: Removed ${beforeCount - afterCount} items from memory`);
+        }
+        
+        res.json({
+            success: true,
+            deletedCount: result.deletedCount,
+            message: `Deleted ${result.deletedCount} encrypted test messages`
+        });
+    } catch (error) {
+        console.error('DEBUG-CLEANUP: Error during cleanup:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
 });
 
    // Start the server
