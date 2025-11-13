@@ -6,6 +6,15 @@ const mongoose = require('mongoose');
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Signal Protocol library for decryption testing - a
+let SignalClient;
+try {
+    SignalClient = require('@signalapp/libsignal-client');
+    console.log('Signal client library loaded successfully');
+} catch (error) {
+    console.log('Signal client library not installed - decrypt-test will not work');
+}
+
 // Global variables
 let feedItemIdCounter = 1000; // Initial default value, will be properly set during initialization
 global.allFeedItems = [];
@@ -846,7 +855,7 @@ app.post('/updateLocation', validateApiKey, (req, res) => {
     player.currentLocation = locationId;
     player.lastActivity = new Date();
     
-    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ ${locationId}`);
+    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ ${locationId}`);
     
     res.json({
         success: true,
@@ -2761,26 +2770,33 @@ app.post('/signal/decrypt-test', validateApiKey, async (req, res) => {
         
         console.log(`DEBUG-SERVER-DECRYPT: Testing decryption from ${senderUsername} to ${recipientUsername}`);
         
+        // Check if Signal library is available
+        if (!SignalClient) {
+            console.log('DEBUG-SERVER-DECRYPT: Signal client library not available');
+            return res.json({
+                error: 'Signal library not installed',
+                instructions: 'Run this on Railway: npm install @signalapp/libsignal-client',
+                message: 'The server needs the Signal library to decrypt messages'
+            });
+        }
+        
         // Load recipient's key bundle
         const recipientKeys = await SignalKeyBundle.findOne({ username: recipientUsername });
         if (!recipientKeys) {
             return res.status(404).json({ error: `No keys found for recipient: ${recipientUsername}` });
         }
         
-        // Load sender's key bundle (for identity verification)
+        // Load sender's key bundle
         const senderKeys = await SignalKeyBundle.findOne({ username: senderUsername });
         if (!senderKeys) {
             return res.status(404).json({ error: `No keys found for sender: ${senderUsername}` });
         }
         
         console.log(`DEBUG-SERVER-DECRYPT: Loaded keys for both users`);
-        console.log(`DEBUG-SERVER-DECRYPT: Recipient identity key: ${recipientKeys.identityKey.substring(0, 50)}...`);
-        console.log(`DEBUG-SERVER-DECRYPT: Sender identity key: ${senderKeys.identityKey.substring(0, 50)}...`);
         
-        // Parse the encrypted message (it's a JSON string containing SignalEncryptedMessage)
+        // Parse the encrypted message
         let encryptedData;
         try {
-            // The encryptedMessage from client is base64 encoded JSON
             const encryptedJSON = Buffer.from(encryptedMessage, 'base64').toString('utf8');
             console.log(`DEBUG-SERVER-DECRYPT: Encrypted JSON: ${encryptedJSON.substring(0, 200)}`);
             encryptedData = JSON.parse(encryptedJSON);
@@ -2798,30 +2814,35 @@ app.post('/signal/decrypt-test', validateApiKey, async (req, res) => {
         console.log(`  - Message Type: ${encryptedData.messageType}`);
         console.log(`  - Ciphertext length: ${encryptedData.ciphertext ? encryptedData.ciphertext.length : 0} chars`);
         
-        // For now, just return key information and message structure
-        // Actual decryption will require libsignal-client Node.js library
-        res.json({
-            success: true,
-            message: 'Decryption endpoint ready - libsignal integration needed',
-            recipientKeys: {
-                username: recipientKeys.username,
-                registrationId: recipientKeys.registrationId,
-                identityKey: recipientKeys.identityKey.substring(0, 50) + '...',
-                preKeyCount: recipientKeys.preKeys.length
-            },
-            senderKeys: {
-                username: senderKeys.username,
-                registrationId: senderKeys.registrationId,
-                identityKey: senderKeys.identityKey.substring(0, 50) + '...',
-                preKeyCount: senderKeys.preKeys.length
-            },
-            encryptedMessage: {
-                recipientUsername: encryptedData.recipientUsername,
-                messageType: encryptedData.messageType,
-                ciphertextLength: encryptedData.ciphertext ? encryptedData.ciphertext.length : 0
-            },
-            note: 'Install @signalapp/libsignal-client for actual decryption'
-        });
+        // Try to decrypt using Signal library
+        try {
+            // This will fail because we don't have private keys on the server
+            // But it shows the structure of what we'd need
+            
+            res.json({
+                success: false,
+                message: 'Server cannot decrypt without private keys',
+                analysis: {
+                    senderUsername,
+                    recipientUsername,
+                    messageType: encryptedData.messageType,
+                    ciphertextLength: encryptedData.ciphertext.length,
+                    hasRecipientPublicKeys: true,
+                    hasSenderPublicKeys: true,
+                    problem: 'E2E encryption means only the recipient device with private keys can decrypt'
+                },
+                suggestion: 'To test decryption, send the recipient private key with the request',
+                testCommand: 'Add recipientPrivateKey field to your curl request with the base64 private key'
+            });
+            
+        } catch (error) {
+            console.error(`DEBUG-SERVER-DECRYPT: Decryption attempt failed: ${error}`);
+            res.json({
+                error: 'Decryption failed',
+                details: error.message,
+                note: 'This is expected - server lacks private keys needed for decryption'
+            });
+        }
         
     } catch (error) {
         console.error(`ERROR in decrypt-test endpoint: ${error}`);
