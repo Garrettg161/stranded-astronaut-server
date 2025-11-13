@@ -846,7 +846,7 @@ app.post('/updateLocation', validateApiKey, (req, res) => {
     player.currentLocation = locationId;
     player.lastActivity = new Date();
     
-    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ ${locationId}`);
+    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ ${locationId}`);
     
     res.json({
         success: true,
@@ -2744,90 +2744,6 @@ app.delete('/signal/cleanup-encrypted-messages', validateApiKey, async (req, res
         res.status(500).json({
             success: false,
             error: error.message
-        });
-    }
-});
-
-// Server-side decryption test endpoint
-app.post('/signal/decrypt-test', validateApiKey, async (req, res) => {
-    try {
-        const { encryptedMessage, senderUsername, recipientUsername } = req.body;
-        
-        if (!encryptedMessage || !senderUsername || !recipientUsername) {
-            return res.status(400).json({
-                error: 'Missing required fields: encryptedMessage, senderUsername, recipientUsername'
-            });
-        }
-        
-        console.log(`DEBUG-SERVER-DECRYPT: Testing decryption from ${senderUsername} to ${recipientUsername}`);
-        
-        // Load recipient's key bundle
-        const recipientKeys = await SignalKeyBundle.findOne({ username: recipientUsername });
-        if (!recipientKeys) {
-            return res.status(404).json({ error: `No keys found for recipient: ${recipientUsername}` });
-        }
-        
-        // Load sender's key bundle (for identity verification)
-        const senderKeys = await SignalKeyBundle.findOne({ username: senderUsername });
-        if (!senderKeys) {
-            return res.status(404).json({ error: `No keys found for sender: ${senderUsername}` });
-        }
-        
-        console.log(`DEBUG-SERVER-DECRYPT: Loaded keys for both users`);
-        console.log(`DEBUG-SERVER-DECRYPT: Recipient identity key: ${recipientKeys.identityKey.substring(0, 50)}...`);
-        console.log(`DEBUG-SERVER-DECRYPT: Sender identity key: ${senderKeys.identityKey.substring(0, 50)}...`);
-        
-        // Parse the encrypted message (it's a JSON string containing SignalEncryptedMessage)
-        let encryptedData;
-        try {
-            // The encryptedMessage from client is base64 encoded JSON
-            const encryptedJSON = Buffer.from(encryptedMessage, 'base64').toString('utf8');
-            console.log(`DEBUG-SERVER-DECRYPT: Encrypted JSON: ${encryptedJSON.substring(0, 200)}`);
-            encryptedData = JSON.parse(encryptedJSON);
-        } catch (error) {
-            console.error(`DEBUG-SERVER-DECRYPT: Failed to parse encrypted message: ${error}`);
-            return res.status(400).json({
-                error: 'Invalid encrypted message format',
-                details: error.message
-            });
-        }
-        
-        console.log(`DEBUG-SERVER-DECRYPT: Parsed encrypted data:`);
-        console.log(`  - Recipient: ${encryptedData.recipientUsername}`);
-        console.log(`  - Device ID: ${encryptedData.deviceId}`);
-        console.log(`  - Message Type: ${encryptedData.messageType}`);
-        console.log(`  - Ciphertext length: ${encryptedData.ciphertext ? encryptedData.ciphertext.length : 0} chars`);
-        
-        // For now, just return key information and message structure
-        // Actual decryption will require libsignal-client Node.js library
-        res.json({
-            success: true,
-            message: 'Decryption endpoint ready - libsignal integration needed',
-            recipientKeys: {
-                username: recipientKeys.username,
-                registrationId: recipientKeys.registrationId,
-                identityKey: recipientKeys.identityKey.substring(0, 50) + '...',
-                preKeyCount: recipientKeys.preKeys.length
-            },
-            senderKeys: {
-                username: senderKeys.username,
-                registrationId: senderKeys.registrationId,
-                identityKey: senderKeys.identityKey.substring(0, 50) + '...',
-                preKeyCount: senderKeys.preKeys.length
-            },
-            encryptedMessage: {
-                recipientUsername: encryptedData.recipientUsername,
-                messageType: encryptedData.messageType,
-                ciphertextLength: encryptedData.ciphertext ? encryptedData.ciphertext.length : 0
-            },
-            note: 'Install @signalapp/libsignal-client for actual decryption'
-        });
-        
-    } catch (error) {
-        console.error(`ERROR in decrypt-test endpoint: ${error}`);
-        res.status(500).json({
-            error: 'Server-side decryption test failed',
-            details: error.message
         });
     }
 });
