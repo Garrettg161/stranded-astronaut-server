@@ -1471,7 +1471,10 @@ app.get('/signal/keys/:username', validateApiKey, async (req, res) => {
         
         console.log(`DEBUG-SIGNAL: Fetching keys for ${username}`);
         
-        const keyBundle = await SignalKeyBundle.findOne({ username: username });
+        // (case-insensitive) username:
+        const keyBundle = await SignalKeyBundle.findOne({
+            username: { $regex: new RegExp(`^${username}$`, 'i') }
+        });
         
         if (!keyBundle) {
             return res.status(404).json({ error: 'Key bundle not found for user' });
