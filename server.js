@@ -1587,9 +1587,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                             );
                             
                             if (parentIndex !== -1) {
-                                if (!global.allFeedItems[parentIndex].commentCount) {
-                                    global.allFeedItems[parentIndex].commentCount = 0;
-                                }
                                 global.allFeedItems[parentIndex].commentCount = updatedParent.commentCount;
                                 console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory with count: ${updatedParent.commentCount}`);
                             }
@@ -1728,6 +1725,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                 });
             } else {
                 res.status(400).json({ error: 'Missing feed item data' });
+            }
+            break;  // THIS WAS MISSING!
                     
         case 'directMessage':
             // Handle encrypted direct messages with multi-recipient support
@@ -1812,179 +1811,178 @@ app.post('/feed', validateApiKey, (req, res) => {
                 res.status(400).json({ error: 'Missing feed item data' });
             }
             break;
+                    
+        case 'getComments':
+            // Get comments for a specific feed item
+            if (feedItemId) {
+                console.log(`Getting comments for feed item: ${feedItemId}`);
+                
+                // Convert feedItemId to string for consistent comparison
+                const itemIdString = typeof feedItemId === 'string' ? feedItemId : String(feedItemId);
+                
+                // Try to get comments from MongoDB first
+                FeedItem.find({ parentId: itemIdString, isDeleted: false })
+                    .then(comments => {
+                        console.log(`Found ${comments.length} comments in MongoDB for item ${feedItemId}`);
+                        
+                        res.json({
+                            success: true,
+                            comments: comments
+                        });
+                    })
+                    .catch(err => {
+                        console.error(`Error getting comments from MongoDB: ${err}`);
+                        
+                        // Fallback to memory if DB fails
+                        const memoryComments = global.allFeedItems.filter(item => {
+                            if (!item.parentId) return false;
+                            
+                            const parentIdString = typeof item.parentId === 'string' ? item.parentId : String(item.parentId);
+                            return parentIdString === itemIdString;
+                        });
+                        
+                        console.log(`Fallback: Found ${memoryComments.length} comments in memory for item ${feedItemId}`);
+                        
+                        res.json({
+                            success: true,
+                            comments: memoryComments
+                        });
+                    });
+            } else {
+                res.status(400).json({ error: 'Missing feed item ID' });
             }
             break;
                     
-                case 'getComments':
-                    // Get comments for a specific feed item
-                    if (feedItemId) {
-                        console.log(`Getting comments for feed item: ${feedItemId}`);
-                        
-                        // Convert feedItemId to string for consistent comparison
-                        const itemIdString = typeof feedItemId === 'string' ? feedItemId : String(feedItemId);
-                        
-                        // Try to get comments from MongoDB first
-                        FeedItem.find({ parentId: itemIdString, isDeleted: false })
-                            .then(comments => {
-                                console.log(`Found ${comments.length} comments in MongoDB for item ${feedItemId}`);
-                                
-                                res.json({
-                                    success: true,
-                                    comments: comments
-                                });
-                            })
-                            .catch(err => {
-                                console.error(`Error getting comments from MongoDB: ${err}`);
-                                
-                                // Fallback to memory if DB fails
-                                const memoryComments = global.allFeedItems.filter(item => {
-                                    if (!item.parentId) return false;
-                                    
-                                    const parentIdString = typeof item.parentId === 'string' ? item.parentId : String(item.parentId);
-                                    return parentIdString === itemIdString;
-                                });
-                                
-                                console.log(`Fallback: Found ${memoryComments.length} comments in memory for item ${feedItemId}`);
-                                
-                                res.json({
-                                    success: true,
-                                    comments: memoryComments
-                                });
-                            });
-                    } else {
-                        res.status(400).json({ error: 'Missing feed item ID' });
-                    }
-                    break;
-                    
-                case 'updateCommentCount':
-                    if (feedItemId && typeof commentCount === 'number') {
+        case 'updateCommentCount':
+            if (feedItemId && typeof commentCount === 'number') {
 
-                        // Add this to the beginning of the updateCommentCount case:
-                        console.log(`DEBUG-SERVER-COMMENT: Received request to update comment count for ${feedItemId} to ${commentCount}`);
-                        // Update in MongoDB
-                        FeedItem.findOneAndUpdate(
-                            { id: String(feedItemId) },
-                            { commentCount: commentCount },
-                            { new: true }
-                        ).then(updatedItem => {
-                            if (updatedItem) {
-                                console.log(`Comment count updated in MongoDB to ${updatedItem.commentCount}`);
-                                
-                                // Update in global array
-                                const globalIndex = global.allFeedItems.findIndex(item =>
+                // Add this to the beginning of the updateCommentCount case:
+                console.log(`DEBUG-SERVER-COMMENT: Received request to update comment count for ${feedItemId} to ${commentCount}`);
+                // Update in MongoDB
+                FeedItem.findOneAndUpdate(
+                    { id: String(feedItemId) },
+                    { commentCount: commentCount },
+                    { new: true }
+                ).then(updatedItem => {
+                    if (updatedItem) {
+                        console.log(`Comment count updated in MongoDB to ${updatedItem.commentCount}`);
+                        
+                        // Update in global array
+                        const globalIndex = global.allFeedItems.findIndex(item =>
+                            String(item.id) === String(feedItemId)
+                        );
+                        
+                        if (globalIndex !== -1) {
+                            global.allFeedItems[globalIndex].commentCount = commentCount;
+                            console.log(`Updated comment count in global array`);
+                        }
+                        
+                        // Update in all sessions
+                        Object.keys(gameSessions).forEach(sessId => {
+                            const session = gameSessions[sessId];
+                            if (session.feedItems) {
+                                const sessionIndex = session.feedItems.findIndex(item =>
                                     String(item.id) === String(feedItemId)
                                 );
                                 
-                                if (globalIndex !== -1) {
-                                    global.allFeedItems[globalIndex].commentCount = commentCount;
-                                    console.log(`Updated comment count in global array`);
+                                if (sessionIndex !== -1) {
+                                    session.feedItems[sessionIndex].commentCount = commentCount;
                                 }
-                                
-                                // Update in all sessions
-                                Object.keys(gameSessions).forEach(sessId => {
-                                    const session = gameSessions[sessId];
-                                    if (session.feedItems) {
-                                        const sessionIndex = session.feedItems.findIndex(item =>
-                                            String(item.id) === String(feedItemId)
-                                        );
-                                        
-                                        if (sessionIndex !== -1) {
-                                            session.feedItems[sessionIndex].commentCount = commentCount;
-                                        }
-                                    }
-                                });
-                                
-                                res.json({
-                                    success: true,
-                                    commentCount: commentCount
-                                });
-                            } else {
-                                console.log(`Item ${feedItemId} not found in MongoDB`);
-                                res.status(404).json({ error: 'Item not found' });
-                            }
-                        }).catch(err => {
-                            console.error(`Error updating comment count in MongoDB: ${err}`);
-                            
-                            // Fallback to memory-only update
-                            const globalIndex = global.allFeedItems.findIndex(item =>
-                                String(item.id) === String(feedItemId)
-                            );
-                            
-                            if (globalIndex !== -1) {
-                                global.allFeedItems[globalIndex].commentCount = commentCount;
-                                
-                                // Update in sessions
-                                Object.keys(gameSessions).forEach(sessId => {
-                                    const session = gameSessions[sessId];
-                                    if (session.feedItems) {
-                                        const sessionIndex = session.feedItems.findIndex(item =>
-                                            String(item.id) === String(feedItemId)
-                                        );
-                                        
-                                        if (sessionIndex !== -1) {
-                                            session.feedItems[sessionIndex].commentCount = commentCount;
-                                        }
-                                    }
-                                });
-                                
-                                res.json({
-                                    success: true,
-                                    commentCount: commentCount
-                                });
-                            } else {
-                                res.status(404).json({ error: 'Item not found in memory' });
                             }
                         });
+                        
+                        res.json({
+                            success: true,
+                            commentCount: commentCount
+                        });
                     } else {
-                        res.status(400).json({ error: 'Missing feed item ID or invalid comment count' });
+                        console.log(`Item ${feedItemId} not found in MongoDB`);
+                        res.status(404).json({ error: 'Item not found' });
                     }
-                    break;
-            case 'updateVoteCount':
-                if (feedItemId && feedItem) {
-                    console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvals: ${feedItem.approvalCount}, disapprovals: ${feedItem.disapprovalCount}`);
+                }).catch(err => {
+                    console.error(`Error updating comment count in MongoDB: ${err}`);
                     
-                    // Try to find by id first, then by feedItemID if not found
-                    const findQuery = {
-                        $or: [
-                            { id: String(feedItemId) },
-                            { feedItemID: String(feedItemId) }
-                        ]
-                    };
-
-                    FeedItem.findOneAndUpdate(
-                        findQuery,
-                        {
-                            approvalCount: feedItem.approvalCount,
-                            disapprovalCount: feedItem.disapprovalCount
-                        },
-                        { new: true }
-                    ).then(updatedItem => {
-                        if (updatedItem) {
-                            console.log(`DEBUG-VOTE-SERVER: Votes updated in MongoDB`);
-                            
-                            const globalIndex = global.allFeedItems.findIndex(item =>
-                                String(item.id) === String(feedItemId)
-                            );
-                            
-                            if (globalIndex !== -1) {
-                                global.allFeedItems[globalIndex].approvalCount = feedItem.approvalCount;
-                                global.allFeedItems[globalIndex].disapprovalCount = feedItem.disapprovalCount;
+                    // Fallback to memory-only update
+                    const globalIndex = global.allFeedItems.findIndex(item =>
+                        String(item.id) === String(feedItemId)
+                    );
+                    
+                    if (globalIndex !== -1) {
+                        global.allFeedItems[globalIndex].commentCount = commentCount;
+                        
+                        // Update in sessions
+                        Object.keys(gameSessions).forEach(sessId => {
+                            const session = gameSessions[sessId];
+                            if (session.feedItems) {
+                                const sessionIndex = session.feedItems.findIndex(item =>
+                                    String(item.id) === String(feedItemId)
+                                );
+                                
+                                if (sessionIndex !== -1) {
+                                    session.feedItems[sessionIndex].commentCount = commentCount;
+                                }
                             }
-                            
-                            res.json({ success: true });
-                        } else {
-                            res.status(404).json({ error: 'Item not found' });
-                        }
-                    }).catch(err => {
-                        console.error(`DEBUG-VOTE-SERVER: Error: ${err}`);
-                        res.status(500).json({ error: 'Database error' });
-                    });
-                } else {
-                    res.status(400).json({ error: 'Missing feed item ID or vote data' });
-                }
-                break;
+                        });
+                        
+                        res.json({
+                            success: true,
+                            commentCount: commentCount
+                        });
+                    } else {
+                        res.status(404).json({ error: 'Item not found in memory' });
+                    }
+                });
+            } else {
+                res.status(400).json({ error: 'Missing feed item ID or invalid comment count' });
+            }
+            break;
+            
+        case 'updateVoteCount':
+            if (feedItemId && feedItem) {
+                console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvals: ${feedItem.approvalCount}, disapprovals: ${feedItem.disapprovalCount}`);
+                
+                // Try to find by id first, then by feedItemID if not found
+                const findQuery = {
+                    $or: [
+                        { id: String(feedItemId) },
+                        { feedItemID: String(feedItemId) }
+                    ]
+                };
 
-            // Find the 'get' case in the switch statement of the /feed endpoint
+                FeedItem.findOneAndUpdate(
+                    findQuery,
+                    {
+                        approvalCount: feedItem.approvalCount,
+                        disapprovalCount: feedItem.disapprovalCount
+                    },
+                    { new: true }
+                ).then(updatedItem => {
+                    if (updatedItem) {
+                        console.log(`DEBUG-VOTE-SERVER: Votes updated in MongoDB`);
+                        
+                        const globalIndex = global.allFeedItems.findIndex(item =>
+                            String(item.id) === String(feedItemId)
+                        );
+                        
+                        if (globalIndex !== -1) {
+                            global.allFeedItems[globalIndex].approvalCount = feedItem.approvalCount;
+                            global.allFeedItems[globalIndex].disapprovalCount = feedItem.disapprovalCount;
+                        }
+                        
+                        res.json({ success: true });
+                    } else {
+                        res.status(404).json({ error: 'Item not found' });
+                    }
+                }).catch(err => {
+                    console.error(`DEBUG-VOTE-SERVER: Error: ${err}`);
+                    res.status(500).json({ error: 'Database error' });
+                });
+            } else {
+                res.status(400).json({ error: 'Missing feed item ID or vote data' });
+            }
+            break;
+
+        // Find the 'get' case in the switch statement of the /feed endpoint
         case 'get':
             console.log("DEBUG-SYNC-SERVER: Handling 'get' feed request");
             
@@ -2051,210 +2049,126 @@ app.post('/feed', validateApiKey, (req, res) => {
             break;
             
         case 'update':
-                    // This handles updating an existing feed item (edit functionality)
-                    if (feedItem && feedItem.id) {
-                        console.log(`Updating feed item: ${feedItem.title} [${feedItem.id}]`);
-                        
-                        // Process media content if present
-                        let processedItem = processMediaContent(feedItem);
-                        
-                        // CRITICAL FIX: Preserve parentId during updates
-                        if (feedItem.parentId) {
-                            processedItem.parentId = feedItem.parentId;
-                            console.log(`DEBUG-COMMENT-SERVER: Updated item has parentId: ${feedItem.parentId}`);
+            // This handles updating an existing feed item (edit functionality)
+            if (feedItem && feedItem.id) {
+                console.log(`Updating feed item: ${feedItem.title} [${feedItem.id}]`);
+                
+                // Process media content if present
+                let processedItem = processMediaContent(feedItem);
+                
+                // CRITICAL FIX: Preserve parentId during updates
+                if (feedItem.parentId) {
+                    processedItem.parentId = feedItem.parentId;
+                    console.log(`DEBUG-COMMENT-SERVER: Updated item has parentId: ${feedItem.parentId}`);
+                }
+                
+                // ADDED: Preserve isRepost during updates
+                if (feedItem.isRepost !== undefined) {
+                    processedItem.isRepost = feedItem.isRepost;
+                    console.log(`DEBUG-REPOST: Updating item with isRepost=${feedItem.isRepost}`);
+                }
+                
+                // CRITICAL: Explicitly preserve encryption fields during updates
+                // (processMediaContent should handle this, but being explicit for safety)
+                if (feedItem.encryptionStatus) {
+                    processedItem.encryptionStatus = feedItem.encryptionStatus;
+                    console.log(`DEBUG-ENCRYPTION-SERVER: Preserving encryptionStatus: ${feedItem.encryptionStatus}`);
+                }
+                if (feedItem.encryptedMessageId) {
+                    processedItem.encryptedMessageId = feedItem.encryptedMessageId;
+                    console.log(`DEBUG-ENCRYPTION-SERVER: Preserving encryptedMessageId: ${feedItem.encryptedMessageId}`);
+                }
+                if (feedItem.encryptedData) {
+                    // Already handled by processMediaContent, but double-check
+                    if (!processedItem.encryptedData) {
+                        if (typeof feedItem.encryptedData === 'string') {
+                            processedItem.encryptedData = Buffer.from(feedItem.encryptedData, 'base64');
+                        } else if (Buffer.isBuffer(feedItem.encryptedData)) {
+                            processedItem.encryptedData = feedItem.encryptedData;
                         }
+                        console.log(`DEBUG-ENCRYPTION-SERVER: Explicitly preserved encryptedData`);
+                    }
+                }
+                
+                // ADD THIS: Preserve ALL Event-specific fields during updates
+                if (feedItem.type === 'event') {
+                    console.log(`DEBUG-SERVER-EVENT: Preserving Event fields for update`);
+                    
+                    processedItem.eventDescription = feedItem.eventDescription;
+                    
+                    // CRITICAL: Preserve Event dates
+                    if (feedItem.eventStartDate) {
+                        processedItem.eventStartDate = new Date(feedItem.eventStartDate);
+                        console.log(`DEBUG-SERVER-EVENT: Preserved eventStartDate: ${processedItem.eventStartDate}`);
+                    }
+                    if (feedItem.eventEndDate) {
+                        processedItem.eventEndDate = new Date(feedItem.eventEndDate);
+                    }
+                    
+                    processedItem.eventTime = feedItem.eventTime;
+                    processedItem.eventLocation = feedItem.eventLocation;
+                    processedItem.eventZoomURL = feedItem.eventZoomURL;
+                    processedItem.eventGoogleMeetURL = feedItem.eventGoogleMeetURL;
+                    processedItem.eventSubstackURL = feedItem.eventSubstackURL;
+                    processedItem.eventStoredVideoURL = feedItem.eventStoredVideoURL;
+                    processedItem.hasCalendarPermission = feedItem.hasCalendarPermission;
+                    processedItem.eventIdentifier = feedItem.eventIdentifier;
+                }
+                
+                // Check if this item already exists (meaning it's an edit)
+                const isEdit = global.allFeedItems.some(item => item.id === processedItem.id);
+                if (isEdit) {
+                    processedItem.timestamp = new Date();
+                    console.log(`Forcing new timestamp for edited item: ${processedItem.id}`);
+                }
+                
+                // Update in MongoDB first
+                FeedItem.findOneAndUpdate(
+                    { id: processedItem.id },
+                    processedItem,
+                    { new: true }
+                ).then(updatedItem => {
+                    if (updatedItem) {
+                        console.log(`Item updated in MongoDB: ${updatedItem.id}`);
                         
-                        // ADDED: Preserve isRepost during updates
-                        if (feedItem.isRepost !== undefined) {
-                            processedItem.isRepost = feedItem.isRepost;
-                            console.log(`DEBUG-REPOST: Updating item with isRepost=${feedItem.isRepost}`);
-                        }
-                        
-                        // CRITICAL: Explicitly preserve encryption fields during updates
-                        // (processMediaContent should handle this, but being explicit for safety)
-                        if (feedItem.encryptionStatus) {
-                            processedItem.encryptionStatus = feedItem.encryptionStatus;
-                            console.log(`DEBUG-ENCRYPTION-SERVER: Preserving encryptionStatus: ${feedItem.encryptionStatus}`);
-                        }
-                        if (feedItem.encryptedMessageId) {
-                            processedItem.encryptedMessageId = feedItem.encryptedMessageId;
-                            console.log(`DEBUG-ENCRYPTION-SERVER: Preserving encryptedMessageId: ${feedItem.encryptedMessageId}`);
-                        }
-                        if (feedItem.encryptedData) {
-                            // Already handled by processMediaContent, but double-check
-                            if (!processedItem.encryptedData) {
-                                if (typeof feedItem.encryptedData === 'string') {
-                                    processedItem.encryptedData = Buffer.from(feedItem.encryptedData, 'base64');
-                                } else if (Buffer.isBuffer(feedItem.encryptedData)) {
-                                    processedItem.encryptedData = feedItem.encryptedData;
-                                }
-                                console.log(`DEBUG-ENCRYPTION-SERVER: Explicitly preserved encryptedData`);
+                        // Find and update in global array
+                        const globalIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
+                        if (globalIndex !== -1) {
+                            // Preserve comment count if not in update
+                            if (!processedItem.commentCount && global.allFeedItems[globalIndex].commentCount) {
+                                processedItem.commentCount = global.allFeedItems[globalIndex].commentCount;
                             }
-                        }
-                        
-                        // ADD THIS: Preserve ALL Event-specific fields during updates
-                        if (feedItem.type === 'event') {
-                            console.log(`DEBUG-SERVER-EVENT: Preserving Event fields for update`);
-                            
-                            processedItem.eventDescription = feedItem.eventDescription;
-                            
-                            // CRITICAL: Preserve Event dates
-                            if (feedItem.eventStartDate) {
-                                processedItem.eventStartDate = new Date(feedItem.eventStartDate);
-                                console.log(`DEBUG-SERVER-EVENT: Preserved eventStartDate: ${processedItem.eventStartDate}`);
+                            // Preserve vote counts from client update
+                            if (feedItem.approvalCount !== undefined) {
+                                processedItem.approvalCount = feedItem.approvalCount;
                             }
-                            if (feedItem.eventEndDate) {
-                                processedItem.eventEndDate = new Date(feedItem.eventEndDate);
+                            if (feedItem.disapprovalCount !== undefined) {
+                                processedItem.disapprovalCount = feedItem.disapprovalCount;
                             }
-                            
-                            processedItem.eventTime = feedItem.eventTime;
-                            processedItem.eventLocation = feedItem.eventLocation;
-                            processedItem.eventZoomURL = feedItem.eventZoomURL;
-                            processedItem.eventGoogleMeetURL = feedItem.eventGoogleMeetURL;
-                            processedItem.eventSubstackURL = feedItem.eventSubstackURL;
-                            processedItem.eventStoredVideoURL = feedItem.eventStoredVideoURL;
-                            processedItem.hasCalendarPermission = feedItem.hasCalendarPermission;
-                            processedItem.eventIdentifier = feedItem.eventIdentifier;
+                            // Update the item in the global pool
+                            global.allFeedItems[globalIndex] = processedItem;
+                            console.log(`Updated item in global feed items pool`);
+                        } else {
+                            // If not found, add it as new
+                            global.allFeedItems.push(processedItem);
+                            console.log(`Item not found in global pool, adding as new`);
                         }
-                        
-                        // Check if this item already exists (meaning it's an edit)
-                        const isEdit = global.allFeedItems.some(item => item.id === processedItem.id);
-                        if (isEdit) {
-                            processedItem.timestamp = new Date();
-                            console.log(`Forcing new timestamp for edited item: ${processedItem.id}`);
-                        }
-                        
-                        // Update in MongoDB first
-                        FeedItem.findOneAndUpdate(
-                            { id: processedItem.id },
-                            processedItem,
-                            { new: true }
-                        ).then(updatedItem => {
-                            if (updatedItem) {
-                                console.log(`Item updated in MongoDB: ${updatedItem.id}`);
-                                
-                                // Find and update in global array
-                                const globalIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
-                                if (globalIndex !== -1) {
-                                    // Preserve comment count if not in update
-                                    if (!processedItem.commentCount && global.allFeedItems[globalIndex].commentCount) {
-                                        processedItem.commentCount = global.allFeedItems[globalIndex].commentCount;
-                                    }
-                                    // Preserve vote counts from client update
-                                    if (feedItem.approvalCount !== undefined) {
-                                        processedItem.approvalCount = feedItem.approvalCount;
-                                    }
-                                    if (feedItem.disapprovalCount !== undefined) {
-                                        processedItem.disapprovalCount = feedItem.disapprovalCount;
-                                    }
-                                    // Update the item in the global pool
-                                    global.allFeedItems[globalIndex] = processedItem;
-                                    console.log(`Updated item in global feed items pool`);
-                                } else {
-                                    // If not found, add it as new
-                                    global.allFeedItems.push(processedItem);
-                                    console.log(`Item not found in global pool, adding as new`);
-                                }
 
-                                // Update in all sessions
-                                Object.keys(gameSessions).forEach(sessId => {
-                                    const session = gameSessions[sessId];
-                                    
-                                    if (!session.feedItems) {
-                                        session.feedItems = [];
-                                    }
-                                    
-                                    // Find the item in this session
-                                    const sessionIndex = session.feedItems.findIndex(item => item.id === processedItem.id);
-                                    if (sessionIndex !== -1) {
-                                        // Preserve comment count if not in update
-                                        if (!processedItem.commentCount && session.feedItems[sessionIndex].commentCount) {
-                                            processedItem.commentCount = session.feedItems[sessionIndex].commentCount;
-                                        }
-                                        // Preserve vote counts from client update
-                                        if (feedItem.approvalCount !== undefined) {
-                                            processedItem.approvalCount = feedItem.approvalCount;
-                                        }
-                                        if (feedItem.disapprovalCount !== undefined) {
-                                            processedItem.disapprovalCount = feedItem.disapprovalCount;
-                                        }
-                                        
-                                        // Update the item
-                                        session.feedItems[sessionIndex] = processedItem;
-                                        console.log(`Updated item in session ${sessId}`);
-                                    } else {
-                                        // If not found, add it as new to this session
-                                        session.feedItems.push(processedItem);
-                                        console.log(`Item not found in session ${sessId}, adding`);
-                                    }
-                                    
-                                    // CRITICAL FIX: Convert encryptedData Buffer to base64 for transmission
-                                    const itemForTransmission = { ...processedItem };
-                                    if (itemForTransmission.encryptedData && Buffer.isBuffer(itemForTransmission.encryptedData)) {
-                                        itemForTransmission.encryptedData = itemForTransmission.encryptedData.toString('base64');
-                                        console.log(`DEBUG-ENCRYPTION-SERVER: Converting encryptedData to base64 for update transmission`);
-                                    }
-                                    
-                                    // Create an update notification for each session
-                                    const updateMessage = {
-                                        id: uuidv4(),
-                                        sessionId: sessId,
-                                        senderId: playerId,
-                                        senderName: gameSessions[sessionId].players[playerId].name,
-                                        targetId: null,
-                                        content: `UPDATE_FEED_ITEM:${JSON.stringify(itemForTransmission)}`,
-                                        timestamp: new Date().getTime(),
-                                        isSystemMessage: false
-                                    };
-                                    
-                                    // Initialize messages array if needed
-                                    if (!session.messages) {
-                                        session.messages = [];
-                                    }
-                                    
-                                    // Add message to session
-                                    session.messages.push(updateMessage);
-                                });
-                                
-                                console.log(`Feed item ${processedItem.id} updated in all sessions`);
-                                res.json({ success: true, feedItemId: processedItem.id });
-                            } else {
-                                console.log(`Item not found in MongoDB, creating new document`);
-                                
-                                // Create new document
-                                const newItem = new FeedItem(processedItem);
-                                newItem.save()
-                                    .then(savedItem => {
-                                        console.log(`New item saved to MongoDB: ${savedItem.id}`);
-                                        
-                                        // Add to global feed items and sessions
-                                        global.allFeedItems.push(processedItem);
-                                        
-                                        // Update in all sessions as new item
-                                        Object.keys(gameSessions).forEach(sessId => {
-                                            const session = gameSessions[sessId];
-                                            
-                                            if (!session.feedItems) {
-                                                session.feedItems = [];
-                                            }
-                                            session.feedItems.push(processedItem);
-                                        });
-                                        
-                                        res.json({ success: true, feedItemId: processedItem.id });
-                                    })
-                                    .catch(err => {
-                                        console.error(`Error saving new item: ${err}`);
-                                        res.status(500).json({ error: 'Database error' });
-                                    });
+                        // Update in all sessions
+                        Object.keys(gameSessions).forEach(sessId => {
+                            const session = gameSessions[sessId];
+                            
+                            if (!session.feedItems) {
+                                session.feedItems = [];
                             }
-                        }).catch(err => {
-                            console.error(`Error updating item in MongoDB: ${err}`);
                             
-                            // Fall back to memory-only update if DB fails
-                            
-                            // Find and update in global array
-                            const globalIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
-                            if (globalIndex !== -1) {
+                            // Find the item in this session
+                            const sessionIndex = session.feedItems.findIndex(item => item.id === processedItem.id);
+                            if (sessionIndex !== -1) {
+                                // Preserve comment count if not in update
+                                if (!processedItem.commentCount && session.feedItems[sessionIndex].commentCount) {
+                                    processedItem.commentCount = session.feedItems[sessionIndex].commentCount;
+                                }
                                 // Preserve vote counts from client update
                                 if (feedItem.approvalCount !== undefined) {
                                     processedItem.approvalCount = feedItem.approvalCount;
@@ -2263,40 +2177,124 @@ app.post('/feed', validateApiKey, (req, res) => {
                                     processedItem.disapprovalCount = feedItem.disapprovalCount;
                                 }
                                 
-                                global.allFeedItems[globalIndex] = processedItem;
-                                console.log(`Updated item in global feed items pool (DB fallback)`);
+                                // Update the item
+                                session.feedItems[sessionIndex] = processedItem;
+                                console.log(`Updated item in session ${sessId}`);
                             } else {
-                                global.allFeedItems.push(processedItem);
-                                console.log(`Item not found in global pool, adding as new (DB fallback)`);
+                                // If not found, add it as new to this session
+                                session.feedItems.push(processedItem);
+                                console.log(`Item not found in session ${sessId}, adding`);
                             }
-
-                            // Update in all sessions
-                            Object.keys(gameSessions).forEach(sessId => {
-                                const session = gameSessions[sessId];
-                                if (!session.feedItems) session.feedItems = [];
-                                
-                                const sessionIndex = session.feedItems.findIndex(item => item.id === processedItem.id);
-                                if (sessionIndex !== -1) {
-                                    // Preserve vote counts from client update
-                                    if (feedItem.approvalCount !== undefined) {
-                                        processedItem.approvalCount = feedItem.approvalCount;
-                                    }
-                                    if (feedItem.disapprovalCount !== undefined) {
-                                        processedItem.disapprovalCount = feedItem.disapprovalCount;
-                                    }
-                                    
-                                    session.feedItems[sessionIndex] = processedItem;
-                                } else {
-                                    session.feedItems.push(processedItem);
-                                }
-                            });
                             
-                            res.json({ success: true, feedItemId: processedItem.id });
+                            // CRITICAL FIX: Convert encryptedData Buffer to base64 for transmission
+                            const itemForTransmission = { ...processedItem };
+                            if (itemForTransmission.encryptedData && Buffer.isBuffer(itemForTransmission.encryptedData)) {
+                                itemForTransmission.encryptedData = itemForTransmission.encryptedData.toString('base64');
+                                console.log(`DEBUG-ENCRYPTION-SERVER: Converting encryptedData to base64 for update transmission`);
+                            }
+                            
+                            // Create an update notification for each session
+                            const updateMessage = {
+                                id: uuidv4(),
+                                sessionId: sessId,
+                                senderId: playerId,
+                                senderName: gameSessions[sessionId].players[playerId].name,
+                                targetId: null,
+                                content: `UPDATE_FEED_ITEM:${JSON.stringify(itemForTransmission)}`,
+                                timestamp: new Date().getTime(),
+                                isSystemMessage: false
+                            };
+                            
+                            // Initialize messages array if needed
+                            if (!session.messages) {
+                                session.messages = [];
+                            }
+                            
+                            // Add message to session
+                            session.messages.push(updateMessage);
                         });
+                        
+                        console.log(`Feed item ${processedItem.id} updated in all sessions`);
+                        res.json({ success: true, feedItemId: processedItem.id });
                     } else {
-                        res.status(400).json({ error: 'Missing feed item data or ID' });
+                        console.log(`Item not found in MongoDB, creating new document`);
+                        
+                        // Create new document
+                        const newItem = new FeedItem(processedItem);
+                        newItem.save()
+                            .then(savedItem => {
+                                console.log(`New item saved to MongoDB: ${savedItem.id}`);
+                                
+                                // Add to global feed items and sessions
+                                global.allFeedItems.push(processedItem);
+                                
+                                // Update in all sessions as new item
+                                Object.keys(gameSessions).forEach(sessId => {
+                                    const session = gameSessions[sessId];
+                                    
+                                    if (!session.feedItems) {
+                                        session.feedItems = [];
+                                    }
+                                    session.feedItems.push(processedItem);
+                                });
+                                
+                                res.json({ success: true, feedItemId: processedItem.id });
+                            })
+                            .catch(err => {
+                                console.error(`Error saving new item: ${err}`);
+                                res.status(500).json({ error: 'Database error' });
+                            });
                     }
-                    break;
+                }).catch(err => {
+                    console.error(`Error updating item in MongoDB: ${err}`);
+                    
+                    // Fall back to memory-only update if DB fails
+                    
+                    // Find and update in global array
+                    const globalIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
+                    if (globalIndex !== -1) {
+                        // Preserve vote counts from client update
+                        if (feedItem.approvalCount !== undefined) {
+                            processedItem.approvalCount = feedItem.approvalCount;
+                        }
+                        if (feedItem.disapprovalCount !== undefined) {
+                            processedItem.disapprovalCount = feedItem.disapprovalCount;
+                        }
+                        
+                        global.allFeedItems[globalIndex] = processedItem;
+                        console.log(`Updated item in global feed items pool (DB fallback)`);
+                    } else {
+                        global.allFeedItems.push(processedItem);
+                        console.log(`Item not found in global pool, adding as new (DB fallback)`);
+                    }
+
+                    // Update in all sessions
+                    Object.keys(gameSessions).forEach(sessId => {
+                        const session = gameSessions[sessId];
+                        if (!session.feedItems) session.feedItems = [];
+                        
+                        const sessionIndex = session.feedItems.findIndex(item => item.id === processedItem.id);
+                        if (sessionIndex !== -1) {
+                            // Preserve vote counts from client update
+                            if (feedItem.approvalCount !== undefined) {
+                                processedItem.approvalCount = feedItem.approvalCount;
+                            }
+                            if (feedItem.disapprovalCount !== undefined) {
+                                processedItem.disapprovalCount = feedItem.disapprovalCount;
+                            }
+                            
+                            session.feedItems[sessionIndex] = processedItem;
+                        } else {
+                            session.feedItems.push(processedItem);
+                        }
+                    });
+                    
+                    res.json({ success: true, feedItemId: processedItem.id });
+                });
+            } else {
+                res.status(400).json({ error: 'Missing feed item data or ID' });
+            }
+            break;
             
         case 'delete':
             // Delete logic
