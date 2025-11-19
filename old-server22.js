@@ -1,4 +1,3 @@
-// Stranded Astronaut Server version 123
 const express = require('express');
 const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
@@ -76,9 +75,7 @@ const feedItemSchema = new mongoose.Schema({
    // Encryption fields
    encryptedData: Buffer,
    encryptionStatus: { type: String, default: 'legacy' },
-   encryptedMessageId: String,
-   encryptedDataPerRecipient: mongoose.Schema.Types.Mixed,
-   imageEncryptionKeys: mongoose.Schema.Types.Mixed
+   encryptedMessageId: String
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
@@ -858,7 +855,7 @@ app.post('/updateLocation', validateApiKey, (req, res) => {
     player.currentLocation = locationId;
     player.lastActivity = new Date();
     
-    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ ${locationId}`);
+    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ ${locationId}`);
     
     res.json({
         success: true,
@@ -1728,90 +1725,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                 });
             } else {
                 res.status(400).json({ error: 'Missing feed item data' });
-                    
-        case 'directMessage':
-            // Handle encrypted direct messages with multi-recipient support
-            if (feedItem) {
-                console.log(`DEBUG-DM-MULTI-SERVER: Processing multi-recipient DM: ${feedItem.title}`);
-                console.log(`DEBUG-DM-MULTI-SERVER: Recipients: ${feedItem.recipients}`);
-                
-                let processedItem = {...feedItem};
-                
-                // Handle per-recipient encrypted data
-                if (feedItem.encryptedDataPerRecipient) {
-                    processedItem.encryptedDataPerRecipient = feedItem.encryptedDataPerRecipient;
-                    const recipientCount = Object.keys(feedItem.encryptedDataPerRecipient).length;
-                    console.log(`DEBUG-DM-MULTI-SERVER: Encrypted data for ${recipientCount} recipients`);
-                }
-                
-                // Handle image encryption keys if present
-                if (feedItem.imageEncryptionKeys) {
-                    processedItem.imageEncryptionKeys = feedItem.imageEncryptionKeys;
-                    console.log(`DEBUG-IMAGE-SERVER: Image encryption keys for ${Object.keys(feedItem.imageEncryptionKeys).length} recipients`);
-                }
-                
-                // Handle media URL for encrypted images
-                if (feedItem.mediaUrl) {
-                    processedItem.mediaUrl = feedItem.mediaUrl;
-                    console.log(`DEBUG-IMAGE-SERVER: Encrypted image URL: ${feedItem.mediaUrl}`);
-                }
-                
-                // Convert timestamp
-                if (processedItem.timestamp && typeof processedItem.timestamp === 'number') {
-                    processedItem.timestamp = new Date(processedItem.timestamp * 1000);
-                } else {
-                    processedItem.timestamp = new Date();
-                }
-                
-                // Assign feedItemID
-                if (!processedItem.feedItemID) {
-                    processedItem.feedItemID = (feedItemIdCounter++).toString();
-                }
-                
-                // Ensure content is placeholder
-                if (processedItem.encryptionStatus === 'encrypted' && processedItem.content !== '[Encrypted Message]') {
-                    console.log(`DEBUG-DM-MULTI-SERVER: Replacing content with placeholder`);
-                    processedItem.content = '[Encrypted Message]';
-                }
-                
-                // Save to MongoDB
-                FeedItem.findOneAndUpdate(
-                    { id: processedItem.id },
-                    processedItem,
-                    { upsert: true, new: true }
-                ).then(savedItem => {
-                    console.log(`DEBUG-DM-MULTI-SERVER: ✅ Multi-recipient message saved: ${savedItem.id}`);
-                    
-                    // Add to global feed
-                    const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
-                    if (!alreadyInGlobal) {
-                        global.allFeedItems.push(processedItem);
-                    }
-                    
-                    // Propagate to sessions
-                    Object.keys(gameSessions).forEach(sessId => {
-                        const session = gameSessions[sessId];
-                        if (!session.feedItems) session.feedItems = [];
-                        
-                        const alreadyInSession = session.feedItems.some(item => item.id === processedItem.id);
-                        if (!alreadyInSession) {
-                            session.feedItems.push(processedItem);
-                        }
-                    });
-                    
-                    res.json({
-                        success: true,
-                        feedItemId: processedItem.id,
-                        recipientCount: processedItem.recipients?.length || 0
-                    });
-                }).catch(err => {
-                    console.error(`DEBUG-DM-MULTI-SERVER: Error saving: ${err}`);
-                    res.status(500).json({ error: 'Database error' });
-                });
-            } else {
-                res.status(400).json({ error: 'Missing feed item data' });
-            }
-            break;
             }
             break;
                     
@@ -2944,133 +2857,6 @@ app.post('/signal/decrypt-test', validateApiKey, async (req, res) => {
 });
 
    // Start the server
-
-// ============================================================================
-// ENCRYPTED IMAGE ENDPOINTS
-// ============================================================================
-
-// Encrypted image upload endpoint
-app.post('/media/encrypted-image/upload', validateApiKey, (req, res) => {
-    console.log('DEBUG-IMAGE-SERVER: Encrypted image upload request received');
-    
-    const chunks = [];
-    
-    req.on('data', chunk => {
-        chunks.push(chunk);
-    });
-    
-    req.on('end', () => {
-        try {
-            const encryptedData = Buffer.concat(chunks);
-            console.log(`DEBUG-IMAGE-SERVER: Received encrypted image: ${encryptedData.length} bytes`);
-            
-            if (encryptedData.length === 0) {
-                console.log('DEBUG-IMAGE-SERVER: ❌ Empty data received');
-                return res.status(400).json({ error: 'No data received' });
-            }
-            
-            const imageId = uuidv4();
-            
-            if (!global.mediaContent) {
-                global.mediaContent = {};
-            }
-            
-            global.mediaContent[imageId] = {
-                data: encryptedData,
-                contentType: 'application/octet-stream',
-                encrypted: true,
-                uploadedAt: new Date(),
-                size: encryptedData.length
-            };
-            
-            const mediaUrl = `/media/encrypted-image/${imageId}`;
-            
-            console.log(`DEBUG-IMAGE-SERVER: ✅ Encrypted image stored with ID: ${imageId}`);
-            
-            res.json({
-                success: true,
-                mediaUrl: mediaUrl,
-                imageId: imageId,
-                size: encryptedData.length
-            });
-            
-        } catch (error) {
-            console.error(`DEBUG-IMAGE-SERVER: ❌ Error processing upload: ${error}`);
-            res.status(500).json({ error: 'Upload processing failed' });
-        }
-    });
-    
-    req.on('error', err => {
-        console.error(`DEBUG-IMAGE-SERVER: ❌ Upload error: ${err}`);
-        res.status(500).json({ error: 'Upload failed' });
-    });
-});
-
-// Encrypted image download endpoint
-app.get('/media/encrypted-image/:id', validateApiKey, (req, res) => {
-    const imageId = req.params.id;
-    console.log(`DEBUG-IMAGE-SERVER: Encrypted image download request for ID: ${imageId}`);
-    
-    if (!global.mediaContent) {
-        console.log('DEBUG-IMAGE-SERVER: ❌ No media content storage initialized');
-        return res.status(404).json({ error: 'Media storage not found' });
-    }
-    
-    const media = global.mediaContent[imageId];
-    
-    if (!media) {
-        console.log(`DEBUG-IMAGE-SERVER: ❌ Encrypted image not found: ${imageId}`);
-        return res.status(404).json({ error: 'Image not found' });
-    }
-    
-    console.log(`DEBUG-IMAGE-SERVER: ✅ Serving encrypted image: ${media.data.length} bytes`);
-    
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Length', media.data.length);
-    res.setHeader('Cache-Control', 'private, max-age=3600');
-    
-    res.send(media.data);
-});
-
-// Encrypted image deletion endpoint
-app.delete('/media/encrypted-image/:id', validateApiKey, (req, res) => {
-    const imageId = req.params.id;
-    console.log(`DEBUG-IMAGE-SERVER: Delete request for encrypted image: ${imageId}`);
-    
-    if (!global.mediaContent || !global.mediaContent[imageId]) {
-        console.log(`DEBUG-IMAGE-SERVER: ❌ Image not found: ${imageId}`);
-        return res.status(404).json({ error: 'Image not found' });
-    }
-    
-    delete global.mediaContent[imageId];
-    console.log(`DEBUG-IMAGE-SERVER: ✅ Encrypted image deleted: ${imageId}`);
-    
-    res.json({ success: true, message: 'Image deleted' });
-});
-
-// Image encryption statistics endpoint
-app.get('/media/encrypted-images/stats', validateApiKey, (req, res) => {
-    if (!global.mediaContent) {
-        return res.json({ totalImages: 0, images: [] });
-    }
-    
-    const encryptedImages = Object.keys(global.mediaContent)
-        .filter(id => global.mediaContent[id].encrypted)
-        .map(id => ({
-            id: id,
-            size: global.mediaContent[id].size,
-            uploadedAt: global.mediaContent[id].uploadedAt
-        }));
-    
-    console.log(`DEBUG-IMAGE-SERVER: Stats request - ${encryptedImages.length} encrypted images`);
-    
-    res.json({
-        totalImages: encryptedImages.length,
-        totalSize: encryptedImages.reduce((sum, img) => sum + img.size, 0),
-        images: encryptedImages
-    });
-});
-
    app.listen(port, () => {
        console.log(`Stranded Astronaut Multiplayer Server v2.3 with Resistance Feed Support running on port ${port}`);
        console.log(`Server initialized with ${global.allFeedItems ? global.allFeedItems.length : 0} global feed items`);
