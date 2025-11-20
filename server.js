@@ -1798,53 +1798,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                         }
                     });
                     
-                    // CRITICAL: Add to global.directMessages for EACH recipient
-                    if (!global.directMessages) {
-                        global.directMessages = {};
-                    }
-                    
-                    if (processedItem.recipients && Array.isArray(processedItem.recipients)) {
-                        processedItem.recipients.forEach(recipientUsername => {
-                            // Get recipient's player ID
-                            let recipientId = null;
-                            Object.keys(gameSessions).forEach(sessId => {
-                                const session = gameSessions[sessId];
-                                Object.keys(session.players).forEach(pId => {
-                                    if (session.players[pId].name === recipientUsername) {
-                                        recipientId = pId;
-                                    }
-                                });
-                            });
-                            
-                            if (recipientId) {
-                                if (!global.directMessages[recipientId]) {
-                                    global.directMessages[recipientId] = [];
-                                }
-                                
-                                // Create DM entry for this recipient
-                                const dmEntry = {
-                                    id: processedItem.id,
-                                    title: processedItem.title,
-                                    content: processedItem.content,
-                                    timestamp: processedItem.timestamp,
-                                    sender: {
-                                        name: processedItem.author,
-                                        organization: processedItem.organization
-                                    },
-                                    recipients: processedItem.recipients,
-                                    encryptionStatus: processedItem.encryptionStatus,
-                                    encryptedDataPerRecipient: processedItem.encryptedDataPerRecipient,
-                                    read: false
-                                };
-                                
-                                global.directMessages[recipientId].push(dmEntry);
-                                console.log(`DEBUG-DM-MULTI-SERVER: ✅ Added DM to directMessages for ${recipientUsername} (${recipientId})`);
-                            } else {
-                                console.log(`DEBUG-DM-MULTI-SERVER: ❌ Could not find player ID for ${recipientUsername}`);
-                            }
-                        });
-                    }
-                    
                     res.json({
                         success: true,
                         feedItemId: processedItem.id,
