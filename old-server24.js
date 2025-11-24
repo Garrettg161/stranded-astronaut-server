@@ -858,7 +858,7 @@ app.post('/updateLocation', validateApiKey, (req, res) => {
     player.currentLocation = locationId;
     player.lastActivity = new Date();
     
-    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ ${locationId}`);
+    console.log(`Location update for player ${player.name} in session ${sessionId}: ${oldLocation} ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ ${locationId}`);
     
     res.json({
         success: true,
@@ -1506,34 +1506,6 @@ app.get('/signal/keys/:username', validateApiKey, async (req, res) => {
     }
 });
 
-// Delete Signal keys for a user (admin/testing)
-app.delete('/signal/keys/:username', validateApiKey, async (req, res) => {
-    try {
-        const { username } = req.params;
-        
-        if (!username) {
-            return res.status(400).json({ error: 'Missing username' });
-        }
-        
-        console.log(`DEBUG-SIGNAL: Deleting keys for ${username}`);
-        
-        // Delete using case-insensitive match
-        const result = await SignalKeyBundle.findOneAndDelete({
-            username: { $regex: new RegExp(`^${username}$`, 'i') }
-        });
-        
-        if (result) {
-            console.log(`DEBUG-SIGNAL: Successfully deleted keys for ${username}`);
-            res.json({ success: true, message: `Keys deleted for ${username}` });
-        } else {
-            res.status(404).json({ error: 'User keys not found' });
-        }
-    } catch (error) {
-        console.error('Error deleting Signal keys:', error);
-        res.status(500).json({ error: 'Failed to delete keys', details: error.message });
-    }
-});
-
 // Feed operations endpoint
 app.post('/feed', validateApiKey, (req, res) => {
     const { sessionId, playerId, action, feedItem, feedItemId, commentCount } = req.body;
@@ -1807,7 +1779,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem,
                     { upsert: true, new: true }
                 ).then(savedItem => {
-                    console.log(`DEBUG-DM-MULTI-SERVER: âœ… Multi-recipient message saved: ${savedItem.id}`);
+                    console.log(`DEBUG-DM-MULTI-SERVER: ✅ Multi-recipient message saved: ${savedItem.id}`);
                     
                     // Add to global feed
                     const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
@@ -2991,7 +2963,7 @@ app.post('/media/encrypted-image/upload', validateApiKey, (req, res) => {
             console.log(`DEBUG-IMAGE-SERVER: Received encrypted image: ${encryptedData.length} bytes`);
             
             if (encryptedData.length === 0) {
-                console.log('DEBUG-IMAGE-SERVER: âŒ Empty data received');
+                console.log('DEBUG-IMAGE-SERVER: ❌ Empty data received');
                 return res.status(400).json({ error: 'No data received' });
             }
             
@@ -3011,7 +2983,7 @@ app.post('/media/encrypted-image/upload', validateApiKey, (req, res) => {
             
             const mediaUrl = `/media/encrypted-image/${imageId}`;
             
-            console.log(`DEBUG-IMAGE-SERVER: âœ… Encrypted image stored with ID: ${imageId}`);
+            console.log(`DEBUG-IMAGE-SERVER: ✅ Encrypted image stored with ID: ${imageId}`);
             
             res.json({
                 success: true,
@@ -3021,13 +2993,13 @@ app.post('/media/encrypted-image/upload', validateApiKey, (req, res) => {
             });
             
         } catch (error) {
-            console.error(`DEBUG-IMAGE-SERVER: âŒ Error processing upload: ${error}`);
+            console.error(`DEBUG-IMAGE-SERVER: ❌ Error processing upload: ${error}`);
             res.status(500).json({ error: 'Upload processing failed' });
         }
     });
     
     req.on('error', err => {
-        console.error(`DEBUG-IMAGE-SERVER: âŒ Upload error: ${err}`);
+        console.error(`DEBUG-IMAGE-SERVER: ❌ Upload error: ${err}`);
         res.status(500).json({ error: 'Upload failed' });
     });
 });
@@ -3038,18 +3010,18 @@ app.get('/media/encrypted-image/:id', validateApiKey, (req, res) => {
     console.log(`DEBUG-IMAGE-SERVER: Encrypted image download request for ID: ${imageId}`);
     
     if (!global.mediaContent) {
-        console.log('DEBUG-IMAGE-SERVER: âŒ No media content storage initialized');
+        console.log('DEBUG-IMAGE-SERVER: ❌ No media content storage initialized');
         return res.status(404).json({ error: 'Media storage not found' });
     }
     
     const media = global.mediaContent[imageId];
     
     if (!media) {
-        console.log(`DEBUG-IMAGE-SERVER: âŒ Encrypted image not found: ${imageId}`);
+        console.log(`DEBUG-IMAGE-SERVER: ❌ Encrypted image not found: ${imageId}`);
         return res.status(404).json({ error: 'Image not found' });
     }
     
-    console.log(`DEBUG-IMAGE-SERVER: âœ… Serving encrypted image: ${media.data.length} bytes`);
+    console.log(`DEBUG-IMAGE-SERVER: ✅ Serving encrypted image: ${media.data.length} bytes`);
     
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', media.data.length);
@@ -3064,12 +3036,12 @@ app.delete('/media/encrypted-image/:id', validateApiKey, (req, res) => {
     console.log(`DEBUG-IMAGE-SERVER: Delete request for encrypted image: ${imageId}`);
     
     if (!global.mediaContent || !global.mediaContent[imageId]) {
-        console.log(`DEBUG-IMAGE-SERVER: âŒ Image not found: ${imageId}`);
+        console.log(`DEBUG-IMAGE-SERVER: ❌ Image not found: ${imageId}`);
         return res.status(404).json({ error: 'Image not found' });
     }
     
     delete global.mediaContent[imageId];
-    console.log(`DEBUG-IMAGE-SERVER: âœ… Encrypted image deleted: ${imageId}`);
+    console.log(`DEBUG-IMAGE-SERVER: ✅ Encrypted image deleted: ${imageId}`);
     
     res.json({ success: true, message: 'Image deleted' });
 });
