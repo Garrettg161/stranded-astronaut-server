@@ -104,21 +104,6 @@ const signalKeyBundleSchema = new mongoose.Schema({
 
 const SignalKeyBundle = mongoose.model('SignalKeyBundle', signalKeyBundleSchema);
 
-// Encrypted Image schema for hybrid AES/Signal encryption (Dec 2025, Phase 1)
-const encryptedImageSchema = new mongoose.Schema({
-   imageId: { type: String, required: true, unique: true, index: true },
-   encryptedImageData: { type: String, required: true }, // Base64-encoded AES-encrypted image
-   encryptedKeysPerRecipient: { type: mongoose.Schema.Types.Mixed, required: true }, // Username -> Signal-encrypted AES key
-   encryptedThumbnail: { type: String, required: false }, // Base64-encoded encrypted thumbnail
-   messageId: { type: String, required: false }, // Link to FeedItem
-   uploadedBy: { type: String, required: true },
-   uploadedAt: { type: Date, default: Date.now },
-   originalSize: { type: Number, required: false },
-   encryptedSize: { type: Number, required: false }
-});
-
-const EncryptedImage = mongoose.model('EncryptedImage', encryptedImageSchema);
-
 // Function to load items from MongoDB at startup
 function loadItemsFromDatabase() {
    return new Promise((resolve, reject) => {
@@ -3094,7 +3079,7 @@ app.get('/media/encrypted-images/stats', validateApiKey, (req, res) => {
     if (!global.mediaContent) {
         return res.json({ totalImages: 0, images: [] });
     }
-
+    
     const encryptedImages = Object.keys(global.mediaContent)
         .filter(id => global.mediaContent[id].encrypted)
         .map(id => ({
@@ -3102,144 +3087,14 @@ app.get('/media/encrypted-images/stats', validateApiKey, (req, res) => {
             size: global.mediaContent[id].size,
             uploadedAt: global.mediaContent[id].uploadedAt
         }));
-
+    
     console.log(`DEBUG-IMAGE-SERVER: Stats request - ${encryptedImages.length} encrypted images`);
-
+    
     res.json({
         totalImages: encryptedImages.length,
         totalSize: encryptedImages.reduce((sum, img) => sum + img.size, 0),
         images: encryptedImages
     });
-});
-
-// =============================================================================
-// HYBRID AES/SIGNAL ENCRYPTED IMAGE ENDPOINTS (Phase 1 - Dec 2025)
-// =============================================================================
-
-// Upload encrypted image with per-recipient Signal-encrypted AES keys
-app.post('/uploadEncryptedImage', validateApiKey, async (req, res) => {
-    console.log('DEBUG-HYBRID-IMAGE: Upload request received');
-
-    try {
-        const {
-            imageId,
-            encryptedImageData,
-            encryptedKeysPerRecipient,
-            encryptedThumbnail,
-            messageId,
-            originalSize,
-            encryptedSize
-        } = req.body;
-
-        // Validation
-        if (!imageId || !encryptedImageData || !encryptedKeysPerRecipient) {
-            console.log('DEBUG-HYBRID-IMAGE: ❌ Missing required fields');
-            return res.status(400).json({
-                success: false,
-                error: 'Missing required fields: imageId, encryptedImageData, encryptedKeysPerRecipient'
-            });
-        }
-
-        // Get username from auth token
-        const username = req.user?.username || req.body.username || 'Anonymous';
-
-        console.log(`DEBUG-HYBRID-IMAGE: Storing encrypted image`);
-        console.log(`DEBUG-HYBRID-IMAGE:   Image ID: ${imageId}`);
-        console.log(`DEBUG-HYBRID-IMAGE:   Uploaded by: ${username}`);
-        console.log(`DEBUG-HYBRID-IMAGE:   Recipients: ${Object.keys(encryptedKeysPerRecipient).join(', ')}`);
-        console.log(`DEBUG-HYBRID-IMAGE:   Original size: ${originalSize} bytes`);
-        console.log(`DEBUG-HYBRID-IMAGE:   Encrypted size: ${encryptedSize} bytes`);
-
-        // Create encrypted image document
-        const encryptedImage = new EncryptedImage({
-            imageId: imageId,
-            encryptedImageData: encryptedImageData,
-            encryptedKeysPerRecipient: encryptedKeysPerRecipient,
-            encryptedThumbnail: encryptedThumbnail,
-            messageId: messageId,
-            uploadedBy: username,
-            uploadedAt: new Date(),
-            originalSize: originalSize,
-            encryptedSize: encryptedSize
-        });
-
-        // Save to MongoDB
-        await encryptedImage.save();
-
-        console.log(`DEBUG-HYBRID-IMAGE: ✅ Encrypted image saved to MongoDB`);
-
-        res.json({
-            success: true,
-            imageId: imageId,
-            recipientCount: Object.keys(encryptedKeysPerRecipient).length
-        });
-
-    } catch (error) {
-        console.error(`DEBUG-HYBRID-IMAGE: ❌ Upload failed: ${error.message}`);
-        console.error(error.stack);
-        res.status(500).json({
-            success: false,
-            error: 'Upload failed',
-            details: error.message
-        });
-    }
-});
-
-// Download encrypted image with user-specific Signal-encrypted AES key
-app.get('/downloadEncryptedImage/:imageId/:username', validateApiKey, async (req, res) => {
-    const { imageId, username } = req.params;
-
-    console.log(`DEBUG-HYBRID-IMAGE: Download request`);
-    console.log(`DEBUG-HYBRID-IMAGE:   Image ID: ${imageId}`);
-    console.log(`DEBUG-HYBRID-IMAGE:   Username: ${username}`);
-
-    try {
-        // Find encrypted image in MongoDB
-        const encryptedImage = await EncryptedImage.findOne({ imageId: imageId });
-
-        if (!encryptedImage) {
-            console.log(`DEBUG-HYBRID-IMAGE: ❌ Image not found: ${imageId}`);
-            return res.status(404).json({
-                success: false,
-                error: 'Image not found'
-            });
-        }
-
-        // Get user's specific encrypted AES key
-        const userEncryptedKey = encryptedImage.encryptedKeysPerRecipient[username];
-
-        if (!userEncryptedKey) {
-            console.log(`DEBUG-HYBRID-IMAGE: ❌ No key found for user: ${username}`);
-            return res.status(403).json({
-                success: false,
-                error: 'Not authorized - no encryption key for this user'
-            });
-        }
-
-        console.log(`DEBUG-HYBRID-IMAGE: ✅ Returning encrypted image for ${username}`);
-        console.log(`DEBUG-HYBRID-IMAGE:   Data size: ${encryptedImage.encryptedImageData.length} chars (base64)`);
-        console.log(`DEBUG-HYBRID-IMAGE:   Has thumbnail: ${encryptedImage.encryptedThumbnail ? 'Yes' : 'No'}`);
-
-        // Return encrypted image data + user's key
-        res.json({
-            success: true,
-            encryptedImageData: encryptedImage.encryptedImageData,
-            encryptedKey: userEncryptedKey,
-            encryptedThumbnail: encryptedImage.encryptedThumbnail,
-            uploadedAt: encryptedImage.uploadedAt,
-            originalSize: encryptedImage.originalSize,
-            encryptedSize: encryptedImage.encryptedSize
-        });
-
-    } catch (error) {
-        console.error(`DEBUG-HYBRID-IMAGE: ❌ Download failed: ${error.message}`);
-        console.error(error.stack);
-        res.status(500).json({
-            success: false,
-            error: 'Download failed',
-            details: error.message
-        });
-    }
 });
 
    app.listen(port, () => {
