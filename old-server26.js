@@ -78,10 +78,7 @@ const feedItemSchema = new mongoose.Schema({
    encryptionStatus: { type: String, default: 'legacy' },
    encryptedMessageId: String,
    encryptedDataPerRecipient: mongoose.Schema.Types.Mixed,
-   imageEncryptionKeys: mongoose.Schema.Types.Mixed,
-   // Encrypted image fields (Phase 1 - Dec 2025)
-   encryptedImageId: String, // ID pointing to EncryptedImage collection
-   encryptedImageKeysPerRecipient: mongoose.Schema.Types.Mixed // Username -> Signal-encrypted AES key (JSON)
+   imageEncryptionKeys: mongoose.Schema.Types.Mixed
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
