@@ -2045,20 +2045,13 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // CRITICAL FIX: Convert encryptedData Buffer to base64 string for transmission
                     const itemsForTransmission = items.map(item => {
                         const itemObj = item.toObject();
-
+                        
                         // Convert encryptedData Buffer to base64 string
                         if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
                             itemObj.encryptedData = itemObj.encryptedData.toString('base64');
                             console.log(`DEBUG-ENCRYPTION-SERVER: Converting encryptedData to base64 for item ${itemObj.id}`);
                         }
-
-                        // DEBUG: Log encrypted image fields if present
-                        if (itemObj.encryptedImageId || itemObj.encryptedImageKeysPerRecipient) {
-                            console.log(`DEBUG-IMAGE-SERVER-GET: Item "${itemObj.title}" has encrypted image fields:`);
-                            console.log(`DEBUG-IMAGE-SERVER-GET:   encryptedImageId = ${itemObj.encryptedImageId || 'MISSING'}`);
-                            console.log(`DEBUG-IMAGE-SERVER-GET:   encryptedImageKeysPerRecipient = ${itemObj.encryptedImageKeysPerRecipient ? JSON.stringify(Object.keys(itemObj.encryptedImageKeysPerRecipient)) : 'MISSING'}`);
-                        }
-
+                        
                         return itemObj;
                     });
                     
@@ -2592,17 +2585,7 @@ function processMediaContent(feedItem) {
             processedItem.encryptedData = feedItem.encryptedData;
         }
     }
-
-    // CRITICAL: Explicitly preserve encrypted IMAGE fields (Phase 1 - Dec 2025)
-    if (feedItem.encryptedImageId) {
-        processedItem.encryptedImageId = feedItem.encryptedImageId;
-        console.log(`DEBUG-IMAGE-SERVER-PUBLISH: Preserving encryptedImageId: ${feedItem.encryptedImageId}`);
-    }
-    if (feedItem.encryptedImageKeysPerRecipient) {
-        processedItem.encryptedImageKeysPerRecipient = feedItem.encryptedImageKeysPerRecipient;
-        console.log(`DEBUG-IMAGE-SERVER-PUBLISH: Preserving encryptedImageKeysPerRecipient with ${Object.keys(feedItem.encryptedImageKeysPerRecipient).length} recipients`);
-    }
-
+    
     try {
         // Handle image data
         if (processedItem.type === 'image' && processedItem.imageUrl) {
