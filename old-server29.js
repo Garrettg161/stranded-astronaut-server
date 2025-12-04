@@ -1,5 +1,5 @@
-// Stranded Astronaut Server version 125
-// v125: Added chapterNumber schema field for TheBook chapter numbering (e.g., "1.1", "2.3")
+// Stranded Astronaut Server version 124
+// v124: Added isTheBook schema field and publish/update handling for narrative content
 const express = require('express');
 const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
@@ -63,7 +63,6 @@ const feedItemSchema = new mongoose.Schema({
    isDeleted: { type: Boolean, default: false },
    isRepost: { type: Boolean, default: false },
    isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
-   chapterNumber: String,  // Chapter numbering for TheBook (e.g., "1.1", "2.3")
    metadata: mongoose.Schema.Types.Mixed,
    eventDescription: String,
    eventStartDate: Date,
@@ -1608,12 +1607,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                         processedItem.isTheBook = true;
                         console.log(`DEBUG-THEBOOK: Publishing item with isTheBook=true`);
                     }
-
-                    // ADD: Preserve chapterNumber property (for TheBook chapter numbering)
-                    if (feedItem.chapterNumber) {
-                        processedItem.chapterNumber = feedItem.chapterNumber;
-                        console.log(`DEBUG-THEBOOK: Publishing item with chapterNumber=${feedItem.chapterNumber}`);
-                    }
                 } catch (error) {
                     console.error("Error processing item:", error);
                     processedItem = {...feedItem};
@@ -2141,13 +2134,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.isTheBook = feedItem.isTheBook;
                     console.log(`DEBUG-THEBOOK: Updating item with isTheBook=${feedItem.isTheBook}`);
                 }
-
-                // ADDED: Preserve chapterNumber during updates (for TheBook chapter numbering)
-                if (feedItem.chapterNumber !== undefined) {
-                    processedItem.chapterNumber = feedItem.chapterNumber;
-                    console.log(`DEBUG-THEBOOK: Updating item with chapterNumber=${feedItem.chapterNumber}`);
-                }
-
+                
                 // CRITICAL: Explicitly preserve encryption fields during updates
                 // (processMediaContent should handle this, but being explicit for safety)
                 if (feedItem.encryptionStatus) {
