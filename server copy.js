@@ -1,5 +1,4 @@
-// Stranded Astronaut Server version 124
-// v124: Added isTheBook schema field and publish/update handling for narrative content
+// Stranded Astronaut Server version 123
 const express = require('express');
 const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
@@ -62,7 +61,6 @@ const feedItemSchema = new mongoose.Schema({
    attributedContentData: String,
    isDeleted: { type: Boolean, default: false },
    isRepost: { type: Boolean, default: false },
-   isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
    metadata: mongoose.Schema.Types.Mixed,
    eventDescription: String,
    eventStartDate: Date,
@@ -1601,12 +1599,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                         processedItem.isRepost = true;
                         console.log(`DEBUG-REPOST: Publishing item with isRepost=true`);
                     }
-                    
-                    // ADD: Preserve isTheBook property (narrative storytelling content)
-                    if (feedItem.isTheBook) {
-                        processedItem.isTheBook = true;
-                        console.log(`DEBUG-THEBOOK: Publishing item with isTheBook=true`);
-                    }
                 } catch (error) {
                     console.error("Error processing item:", error);
                     processedItem = {...feedItem};
@@ -2127,12 +2119,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItem.isRepost !== undefined) {
                     processedItem.isRepost = feedItem.isRepost;
                     console.log(`DEBUG-REPOST: Updating item with isRepost=${feedItem.isRepost}`);
-                }
-                
-                // ADDED: Preserve isTheBook during updates (narrative storytelling content)
-                if (feedItem.isTheBook !== undefined) {
-                    processedItem.isTheBook = feedItem.isTheBook;
-                    console.log(`DEBUG-THEBOOK: Updating item with isTheBook=${feedItem.isTheBook}`);
                 }
                 
                 // CRITICAL: Explicitly preserve encryption fields during updates
