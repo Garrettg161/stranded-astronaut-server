@@ -223,7 +223,7 @@ function initializeFeedItemIdCounter() {
 
 // Middleware
 app.use(cors());
-app.use(bodyParser.json({ limit: '20mb' })); // Increase JSON size limit for base64 data
+app.use(bodyParser.json({ limit: '500mb' })); // Increase JSON size limit for base64 data
 
 // API Key validation middleware
 const validateApiKey = (req, res, next) => {
