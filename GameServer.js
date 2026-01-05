@@ -1,5 +1,4 @@
-// Stranded Astronaut Server version 126
-// v126: Added isLibraryDocument and feedVisibilityOverride schema fields
+// Stranded Astronaut Server version 125
 // v125: Added chapterNumber schema field for TheBook chapter numbering (e.g., "1.1", "2.3")
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -65,8 +64,6 @@ const feedItemSchema = new mongoose.Schema({
    isRepost: { type: Boolean, default: false },
    isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
    chapterNumber: String,  // Chapter numbering for TheBook (e.g., "1.1", "2.3")
-   isLibraryDocument: { type: Boolean, default: false },  // Cannot be deleted by users
-   feedVisibilityOverride: { type: Boolean, default: null },  // false = hidden from feed but accessible via hotspots
    metadata: mongoose.Schema.Types.Mixed,
    eventDescription: String,
    eventStartDate: Date,
@@ -1617,17 +1614,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                         processedItem.chapterNumber = feedItem.chapterNumber;
                         console.log(`DEBUG-THEBOOK: Publishing item with chapterNumber=${feedItem.chapterNumber}`);
                     }
-
-                    // ADD: Preserve isLibraryDocument property
-                    if (feedItem.isLibraryDocument !== undefined) {
-                        processedItem.isLibraryDocument = feedItem.isLibraryDocument;
-                    }
-
-                    // ADD: Preserve feedVisibilityOverride property
-                    if (feedItem.feedVisibilityOverride !== undefined) {
-                        processedItem.feedVisibilityOverride = feedItem.feedVisibilityOverride;
-                    }
                 } catch (error) {
+                    console.error("Error processing item:", error);
+                    processedItem = {...feedItem};
+                }
                 
                 // CRITICAL FIX: Assign a unique numeric ID as string
                 if (!processedItem.feedItemID) {
@@ -2156,16 +2146,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItem.chapterNumber !== undefined) {
                     processedItem.chapterNumber = feedItem.chapterNumber;
                     console.log(`DEBUG-THEBOOK: Updating item with chapterNumber=${feedItem.chapterNumber}`);
-                }
-
-                // ADDED: Preserve isLibraryDocument during updates
-                if (feedItem.isLibraryDocument !== undefined) {
-                    processedItem.isLibraryDocument = feedItem.isLibraryDocument;
-                }
-
-                // ADDED: Preserve feedVisibilityOverride during updates
-                if (feedItem.feedVisibilityOverride !== undefined) {
-                    processedItem.feedVisibilityOverride = feedItem.feedVisibilityOverride;
                 }
 
                 // CRITICAL: Explicitly preserve encryption fields during updates
