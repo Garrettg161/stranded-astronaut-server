@@ -1628,6 +1628,9 @@ app.post('/feed', validateApiKey, (req, res) => {
                         processedItem.feedVisibilityOverride = feedItem.feedVisibilityOverride;
                     }
                 } catch (error) {
+                    console.error("Error processing item:", error);
+                    processedItem = {...feedItem};
+                }
                 
                 // CRITICAL FIX: Assign a unique numeric ID as string
                 if (!processedItem.feedItemID) {
