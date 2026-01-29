@@ -1,5 +1,12 @@
-// Stranded Astronaut Server version 126
-// v126: Added isLibraryDocument and feedVisibilityOverride schema fields
+// Stranded Astronaut Server version 127
+// v127: Key versioning and message retry system
+//   - Added keyVersion and keyHistory to SignalKeyBundle
+//   - Added delivery tracking to FeedItem
+//   - Added KeyChangeNotification schema
+//   - New endpoints: /notifications, /messages/mark-delivered, /messages/update-encryption
+//   - Admin endpoints: /admin/message/:id, /admin/user/:username/keys, /admin/user/:username/messages
+//   - Auto-detect key changes and queue re-encryption notifications
+// v126: (skipped - went from v125 to v127)
 // v125: Added chapterNumber schema field for TheBook chapter numbering (e.g., "1.1", "2.3")
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -65,8 +72,6 @@ const feedItemSchema = new mongoose.Schema({
    isRepost: { type: Boolean, default: false },
    isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
    chapterNumber: String,  // Chapter numbering for TheBook (e.g., "1.1", "2.3")
-   isLibraryDocument: { type: Boolean, default: false },  // Cannot be deleted by users
-   feedVisibilityOverride: { type: Boolean, default: null },  // false = hidden from feed but accessible via hotspots
    metadata: mongoose.Schema.Types.Mixed,
    eventDescription: String,
    eventStartDate: Date,
@@ -87,7 +92,22 @@ const feedItemSchema = new mongoose.Schema({
    imageEncryptionKeys: mongoose.Schema.Types.Mixed,
    // Encrypted image fields (Phase 1 - Dec 2025)
    encryptedImageId: String, // ID pointing to EncryptedImage collection
-   encryptedImageKeysPerRecipient: mongoose.Schema.Types.Mixed // Username -> Signal-encrypted AES key (JSON)
+   encryptedImageKeysPerRecipient: mongoose.Schema.Types.Mixed, // Username -> Signal-encrypted AES key (JSON)
+
+   // v127: Key versioning and delivery tracking
+   encryptedForKeyVersions: { type: mongoose.Schema.Types.Mixed, default: {} },
+   deliveryStatus: { type: mongoose.Schema.Types.Mixed, default: {} },
+   deliveryAttempts: { type: mongoose.Schema.Types.Mixed, default: {} },
+   deliveredAt: { type: mongoose.Schema.Types.Mixed, default: {} },
+   lastDeliveryAttempt: { type: mongoose.Schema.Types.Mixed, default: {} },
+   reencryptionHistory: [{
+      recipient: String,
+      fromKeyVersion: Number,
+      toKeyVersion: Number,
+      reencryptedAt: Date,
+      reencryptedBy: String,
+      success: Boolean
+   }]
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
@@ -108,7 +128,19 @@ const signalKeyBundleSchema = new mongoose.Schema({
       id: { type: Number, required: true },
       publicKey: { type: String, required: true } // Base64 encoded
    }],
-   updatedAt: { type: Date, default: Date.now }
+   updatedAt: { type: Date, default: Date.now },
+
+   // v127: Key versioning
+   keyVersion: { type: Number, default: 1 },
+   identityKeyFingerprint: { type: String },
+   keyHistory: [{
+      keyVersion: Number,
+      identityKey: String,
+      identityKeyFingerprint: String,
+      uploadedAt: Date,
+      uploadSource: String,
+      preKeyCount: Number
+   }]
 });
 
 const SignalKeyBundle = mongoose.model('SignalKeyBundle', signalKeyBundleSchema);
@@ -127,6 +159,120 @@ const encryptedImageSchema = new mongoose.Schema({
 });
 
 const EncryptedImage = mongoose.model('EncryptedImage', encryptedImageSchema);
+
+// v127: Key change notification schema
+const keyChangeNotificationSchema = new mongoose.Schema({
+   id: { type: String, required: true, unique: true, index: true },
+   recipientUsername: { type: String, required: true, index: true },
+   senderUsername: { type: String, required: true, index: true },
+   oldKeyVersion: { type: Number, required: true },
+   newKeyVersion: { type: Number, required: true },
+   oldIdentityKeyFingerprint: String,
+   newIdentityKeyFingerprint: String,
+   affectedMessageIds: [String],
+   affectedMessageCount: { type: Number, default: 0 },
+   status: {
+      type: String,
+      enum: ['pending', 'sent', 'acknowledged', 'reencrypted', 'failed', 'expired'],
+      default: 'pending'
+   },
+   createdAt: { type: Date, default: Date.now },
+   sentAt: Date,
+   acknowledgedAt: Date,
+   reencryptedAt: Date,
+   expiresAt: Date,
+   sendAttempts: { type: Number, default: 0 },
+   lastSendAttempt: Date,
+   processingLog: [{
+      action: String,
+      timestamp: Date,
+      details: String
+   }]
+});
+
+keyChangeNotificationSchema.index({ recipientUsername: 1, status: 1 });
+keyChangeNotificationSchema.index({ senderUsername: 1, status: 1 });
+keyChangeNotificationSchema.index({ createdAt: 1 });
+
+const KeyChangeNotification = mongoose.model('KeyChangeNotification', keyChangeNotificationSchema);
+
+// v127: Calculate identity key fingerprint
+const crypto = require('crypto');
+function calculateKeyFingerprint(identityKey) {
+   return crypto
+      .createHash('sha256')
+      .update(identityKey)
+      .digest('hex')
+      .substring(0, 16);
+}
+
+// v127: Queue notifications when keys change
+async function queueKeyChangeNotifications(username, oldKeyVersion, newKeyVersion, oldFingerprint, newFingerprint) {
+   console.log(`DEBUG-KEY-VERSION: Checking for undelivered messages to ${username}`);
+
+   // Find all undelivered messages TO this user (case-insensitive)
+   const undeliveredMessages = await FeedItem.find({
+      isDirectMessage: true,
+      recipients: { $elemMatch: { $regex: new RegExp(`^${username}$`, 'i') } }
+   });
+
+   // Filter to only those without 'delivered' status for this user
+   const needsReencrypt = undeliveredMessages.filter(msg => {
+      const status = msg.deliveryStatus?.[username] || msg.deliveryStatus?.[username.toLowerCase()];
+      return !status || status === 'pending' || status === 'failed';
+   });
+
+   if (needsReencrypt.length === 0) {
+      console.log(`DEBUG-KEY-VERSION: No undelivered messages for ${username} - no notifications needed`);
+      return;
+   }
+
+   console.log(`DEBUG-KEY-VERSION: Found ${needsReencrypt.length} undelivered messages for ${username}`);
+
+   // Group by sender
+   const messagesBySender = {};
+   needsReencrypt.forEach(msg => {
+      const sender = msg.author;
+      if (!messagesBySender[sender]) {
+         messagesBySender[sender] = [];
+      }
+      messagesBySender[sender].push(msg.id);
+   });
+
+   // Create notification for each sender
+   for (const [sender, messageIds] of Object.entries(messagesBySender)) {
+      const notification = new KeyChangeNotification({
+         id: uuidv4(),
+         recipientUsername: username,
+         senderUsername: sender,
+         oldKeyVersion: oldKeyVersion,
+         newKeyVersion: newKeyVersion,
+         oldIdentityKeyFingerprint: oldFingerprint,
+         newIdentityKeyFingerprint: newFingerprint,
+         affectedMessageIds: messageIds,
+         affectedMessageCount: messageIds.length,
+         status: 'pending',
+         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+         processingLog: [{
+            action: 'created',
+            timestamp: new Date(),
+            details: `Key change detected: ${messageIds.length} messages need re-encryption`
+         }]
+      });
+
+      await notification.save();
+
+      // Mark affected messages as needing re-encryption
+      for (const msgId of messageIds) {
+         await FeedItem.findOneAndUpdate(
+            { id: msgId },
+            { $set: { [`deliveryStatus.${username}`]: 'needs_reencrypt' } }
+         );
+      }
+
+      console.log(`DEBUG-KEY-VERSION: Queued notification for ${sender}: ${messageIds.length} messages to ${username}`);
+   }
+}
 
 // Function to load items from MongoDB at startup
 function loadItemsFromDatabase() {
@@ -1440,25 +1586,72 @@ app.post('/directMessages', validateApiKey, (req, res) => {
 // SIGNAL PROTOCOL ENDPOINTS
 // ========================================
 
-// Upload Signal key bundle
+// v127: Enhanced key upload with versioning and change detection
 app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
     try {
-        const { username, keyBundle } = req.body;
-        
+        const { username, keyBundle, source } = req.body;
+
         if (!username || !keyBundle) {
             return res.status(400).json({ error: 'Missing username or keyBundle' });
         }
-        
+
         // Validate key bundle structure
         if (!keyBundle.registrationId || !keyBundle.deviceId || !keyBundle.identityKey ||
             !keyBundle.signedPreKeyId || !keyBundle.signedPreKeyPublic || !keyBundle.signedPreKeySignature ||
             !keyBundle.preKeys || !Array.isArray(keyBundle.preKeys)) {
             return res.status(400).json({ error: 'Invalid key bundle structure' });
         }
-        
+
         console.log(`DEBUG-SIGNAL: Uploading keys for ${username}, preKeys count: ${keyBundle.preKeys.length}`);
-        
-        // Upsert the key bundle (update if exists, insert if new)
+
+        // Get existing bundle for comparison
+        const existingBundle = await SignalKeyBundle.findOne({ username: username });
+
+        // Calculate new fingerprint
+        const newFingerprint = calculateKeyFingerprint(keyBundle.identityKey);
+
+        let keyChanged = false;
+        let oldKeyVersion = 0;
+        let newKeyVersion = 1;
+
+        if (existingBundle) {
+            oldKeyVersion = existingBundle.keyVersion || 1;
+
+            // Check if identity key changed
+            if (existingBundle.identityKeyFingerprint && existingBundle.identityKeyFingerprint !== newFingerprint) {
+                keyChanged = true;
+                newKeyVersion = oldKeyVersion + 1;
+
+                console.log(`DEBUG-KEY-VERSION: KEY CHANGE DETECTED for ${username}: v${oldKeyVersion} -> v${newKeyVersion}`);
+                console.log(`DEBUG-KEY-VERSION: Old fingerprint: ${existingBundle.identityKeyFingerprint}, New: ${newFingerprint}`);
+
+                // Queue notifications for senders with undelivered messages
+                await queueKeyChangeNotifications(
+                    username,
+                    oldKeyVersion,
+                    newKeyVersion,
+                    existingBundle.identityKeyFingerprint,
+                    newFingerprint
+                );
+            } else {
+                newKeyVersion = oldKeyVersion;  // Same key, same version
+                console.log(`DEBUG-KEY-VERSION: Keys unchanged for ${username}, version stays at ${newKeyVersion}`);
+            }
+        } else {
+            console.log(`DEBUG-KEY-VERSION: First key upload for ${username}, version = 1`);
+        }
+
+        // Build key history entry
+        const historyEntry = {
+            keyVersion: newKeyVersion,
+            identityKey: keyBundle.identityKey,
+            identityKeyFingerprint: newFingerprint,
+            uploadedAt: new Date(),
+            uploadSource: source || 'unknown',
+            preKeyCount: keyBundle.preKeys.length
+        };
+
+        // Upsert the key bundle
         await SignalKeyBundle.findOneAndUpdate(
             { username: username },
             {
@@ -1473,14 +1666,25 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
                 kyberPreKeyPublic: keyBundle.kyberPreKeyPublic,
                 kyberPreKeySignature: keyBundle.kyberPreKeySignature,
                 preKeys: keyBundle.preKeys,
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                keyVersion: newKeyVersion,
+                identityKeyFingerprint: newFingerprint,
+                $push: { keyHistory: historyEntry }
             },
             { upsert: true, new: true }
         );
-        
-        console.log(`DEBUG-SIGNAL: Successfully stored key bundle for ${username}`);
-        res.json({ success: true, message: 'Key bundle uploaded successfully' });
-        
+
+        console.log(`DEBUG-SIGNAL: Successfully stored key bundle for ${username} (v${newKeyVersion})`);
+
+        res.json({
+            success: true,
+            message: keyChanged
+                ? `Key updated to version ${newKeyVersion}. Notifications queued for senders.`
+                : `Key bundle uploaded (version ${newKeyVersion})`,
+            keyVersion: newKeyVersion,
+            keyChanged: keyChanged
+        });
+
     } catch (error) {
         console.error(`ERROR uploading Signal keys: ${error}`);
         res.status(500).json({ error: 'Failed to upload key bundle', details: error.message });
@@ -1558,10 +1762,479 @@ app.delete('/signal/keys/:username', validateApiKey, async (req, res) => {
     }
 });
 
+// ========================================
+// v127: KEY VERSIONING AND NOTIFICATION ENDPOINTS
+// ========================================
+
+// v127: Get pending notifications for a sender
+app.get('/notifications', validateApiKey, async (req, res) => {
+    try {
+        const { username } = req.query;
+
+        if (!username) {
+            return res.status(400).json({ error: 'Missing username parameter' });
+        }
+
+        console.log(`DEBUG-KEY-VERSION: Fetching notifications for sender ${username}`);
+
+        // Get pending notifications for this sender (case-insensitive)
+        const notifications = await KeyChangeNotification.find({
+            senderUsername: { $regex: new RegExp(`^${username}$`, 'i') },
+            status: { $in: ['pending', 'sent'] }
+        }).sort({ createdAt: 1 });
+
+        if (notifications.length > 0) {
+            // Mark as sent
+            const notificationIds = notifications.map(n => n.id);
+            await KeyChangeNotification.updateMany(
+                { id: { $in: notificationIds } },
+                {
+                    status: 'sent',
+                    sentAt: new Date(),
+                    $inc: { sendAttempts: 1 },
+                    lastSendAttempt: new Date()
+                }
+            );
+
+            console.log(`DEBUG-KEY-VERSION: Returning ${notifications.length} notifications for ${username}`);
+        }
+
+        res.json({
+            notifications: notifications.map(n => ({
+                id: n.id,
+                type: 'KEY_CHANGED',
+                recipientUsername: n.recipientUsername,
+                oldKeyVersion: n.oldKeyVersion,
+                newKeyVersion: n.newKeyVersion,
+                affectedMessageIds: n.affectedMessageIds,
+                affectedMessageCount: n.affectedMessageCount,
+                createdAt: n.createdAt
+            }))
+        });
+
+    } catch (error) {
+        console.error(`ERROR fetching notifications: ${error}`);
+        res.status(500).json({ error: 'Failed to fetch notifications', details: error.message });
+    }
+});
+
+// v127: Acknowledge processing of a notification
+app.post('/notifications/acknowledge', validateApiKey, async (req, res) => {
+    try {
+        const { notificationId, action, success, details } = req.body;
+
+        if (!notificationId) {
+            return res.status(400).json({ error: 'Missing notificationId' });
+        }
+
+        const notification = await KeyChangeNotification.findOne({ id: notificationId });
+        if (!notification) {
+            return res.status(404).json({ error: 'Notification not found' });
+        }
+
+        console.log(`DEBUG-KEY-VERSION: Acknowledging notification ${notificationId}: ${action}, success=${success}`);
+
+        // Update notification status
+        await KeyChangeNotification.findOneAndUpdate(
+            { id: notificationId },
+            {
+                status: success ? 'reencrypted' : 'failed',
+                acknowledgedAt: new Date(),
+                reencryptedAt: success ? new Date() : null,
+                $push: {
+                    processingLog: {
+                        action: action || 'acknowledge',
+                        timestamp: new Date(),
+                        details: details || (success ? 'Re-encryption successful' : 'Re-encryption failed')
+                    }
+                }
+            }
+        );
+
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error(`ERROR acknowledging notification: ${error}`);
+        res.status(500).json({ error: 'Failed to acknowledge notification', details: error.message });
+    }
+});
+
+// v127: Mark a message as successfully delivered/decrypted
+app.post('/messages/mark-delivered', validateApiKey, async (req, res) => {
+    try {
+        const { messageId, recipientUsername } = req.body;
+
+        if (!messageId || !recipientUsername) {
+            return res.status(400).json({ error: 'Missing messageId or recipientUsername' });
+        }
+
+        console.log(`DEBUG-KEY-VERSION: Marking message ${messageId.substring(0,8)} delivered to ${recipientUsername}`);
+
+        // Update delivery status
+        const result = await FeedItem.findOneAndUpdate(
+            { id: messageId },
+            {
+                $set: {
+                    [`deliveryStatus.${recipientUsername}`]: 'delivered',
+                    [`deliveredAt.${recipientUsername}`]: new Date()
+                },
+                $inc: {
+                    [`deliveryAttempts.${recipientUsername}`]: 1
+                }
+            },
+            { new: true }
+        );
+
+        if (!result) {
+            return res.status(404).json({ error: 'Message not found' });
+        }
+
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error(`ERROR marking message delivered: ${error}`);
+        res.status(500).json({ error: 'Failed to mark delivered', details: error.message });
+    }
+});
+
+// v127: Update encrypted data after re-encryption
+app.post('/messages/update-encryption', validateApiKey, async (req, res) => {
+    try {
+        const {
+            messageId,
+            recipientUsername,
+            newEncryptedData,
+            newKeyVersion,
+            newEncryptedImageKey  // Optional, for image DMs
+        } = req.body;
+
+        if (!messageId || !recipientUsername || !newEncryptedData) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        const message = await FeedItem.findOne({ id: messageId });
+        if (!message) {
+            return res.status(404).json({ error: 'Message not found' });
+        }
+
+        // Get old key version for audit
+        const oldKeyVersion = message.encryptedForKeyVersions?.[recipientUsername] || 1;
+
+        console.log(`DEBUG-KEY-VERSION: Updating encryption for message ${messageId.substring(0,8)}`);
+        console.log(`DEBUG-KEY-VERSION: Recipient ${recipientUsername}: v${oldKeyVersion} -> v${newKeyVersion}`);
+
+        // Build update operations
+        const updateOps = {
+            $set: {
+                [`encryptedDataPerRecipient.${recipientUsername}`]: newEncryptedData,
+                [`encryptedForKeyVersions.${recipientUsername}`]: newKeyVersion,
+                [`deliveryStatus.${recipientUsername}`]: 'pending',
+                [`lastDeliveryAttempt.${recipientUsername}`]: new Date()
+            },
+            $push: {
+                reencryptionHistory: {
+                    recipient: recipientUsername,
+                    fromKeyVersion: oldKeyVersion,
+                    toKeyVersion: newKeyVersion,
+                    reencryptedAt: new Date(),
+                    reencryptedBy: message.author,
+                    success: true
+                }
+            }
+        };
+
+        // Also update image key if provided
+        if (newEncryptedImageKey) {
+            updateOps.$set[`encryptedImageKeysPerRecipient.${recipientUsername}`] = newEncryptedImageKey;
+            console.log(`DEBUG-KEY-VERSION: Also updating encrypted image key for ${recipientUsername}`);
+        }
+
+        await FeedItem.findOneAndUpdate({ id: messageId }, updateOps);
+
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error(`ERROR updating encryption: ${error}`);
+        res.status(500).json({ error: 'Failed to update encryption', details: error.message });
+    }
+});
+
+// ========================================
+// v127: ADMIN DIAGNOSTIC ENDPOINTS
+// ========================================
+
+// v127: Get full diagnostic info for a message
+app.get('/admin/message/:messageId', validateApiKey, async (req, res) => {
+    try {
+        const { messageId } = req.params;
+
+        const message = await FeedItem.findOne({ id: messageId });
+        if (!message) {
+            return res.status(404).json({ error: 'Message not found' });
+        }
+
+        // Build diagnostic info for each recipient
+        const recipientDiagnostics = [];
+        for (const recipient of (message.recipients || [])) {
+            const keyBundle = await SignalKeyBundle.findOne({
+                username: { $regex: new RegExp(`^${recipient}$`, 'i') }
+            });
+
+            const encryptedForVersion = message.encryptedForKeyVersions?.[recipient] || 'unknown';
+            const currentVersion = keyBundle?.keyVersion || 'unknown';
+            const keyMatch = encryptedForVersion === currentVersion;
+
+            recipientDiagnostics.push({
+                recipient,
+                encryptedForKeyVersion: encryptedForVersion,
+                currentKeyVersion: currentVersion,
+                keyVersionMatch: keyMatch,
+                deliveryStatus: message.deliveryStatus?.[recipient] || 'unknown',
+                deliveredAt: message.deliveredAt?.[recipient] || null,
+                deliveryAttempts: message.deliveryAttempts?.[recipient] || 0,
+                hasEncryptedData: !!message.encryptedDataPerRecipient?.[recipient],
+                hasEncryptedImageKey: !!message.encryptedImageKeysPerRecipient?.[recipient],
+                recommendation: keyMatch
+                    ? 'Keys match - should decrypt'
+                    : 'KEY MISMATCH - needs re-encryption'
+            });
+        }
+
+        // Get related notifications
+        const notifications = await KeyChangeNotification.find({
+            affectedMessageIds: messageId
+        });
+
+        res.json({
+            messageId: message.id,
+            feedItemID: message.feedItemID,
+            title: message.title?.substring(0, 50),
+            content: message.content?.substring(0, 100),
+            author: message.author,
+            recipients: message.recipients,
+            timestamp: message.timestamp,
+            encryptionStatus: message.encryptionStatus,
+            hasEncryptedImage: !!message.encryptedImageId,
+            recipientDiagnostics,
+            reencryptionHistory: message.reencryptionHistory || [],
+            relatedNotifications: notifications.map(n => ({
+                id: n.id,
+                status: n.status,
+                createdAt: n.createdAt,
+                sender: n.senderUsername
+            }))
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin message diagnostic: ${error}`);
+        res.status(500).json({ error: 'Failed to get diagnostic', details: error.message });
+    }
+});
+
+// v127: Get full key history for a user
+app.get('/admin/user/:username/keys', validateApiKey, async (req, res) => {
+    try {
+        const { username } = req.params;
+
+        const keyBundle = await SignalKeyBundle.findOne({
+            username: { $regex: new RegExp(`^${username}$`, 'i') }
+        });
+
+        if (!keyBundle) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        res.json({
+            username: keyBundle.username,
+            currentKeyVersion: keyBundle.keyVersion || 1,
+            currentIdentityFingerprint: keyBundle.identityKeyFingerprint || 'not tracked',
+            currentPreKeyCount: keyBundle.preKeys?.length || 0,
+            registrationId: keyBundle.registrationId,
+            lastUpdated: keyBundle.updatedAt,
+            keyHistory: (keyBundle.keyHistory || []).map(h => ({
+                keyVersion: h.keyVersion,
+                fingerprint: h.identityKeyFingerprint,
+                uploadedAt: h.uploadedAt,
+                source: h.uploadSource,
+                preKeyCount: h.preKeyCount
+            })),
+            totalKeyChanges: Math.max(0, (keyBundle.keyHistory?.length || 1) - 1)
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin user keys: ${error}`);
+        res.status(500).json({ error: 'Failed to get key history', details: error.message });
+    }
+});
+
+// v127: Get all messages involving a user with delivery status
+app.get('/admin/user/:username/messages', validateApiKey, async (req, res) => {
+    try {
+        const { username } = req.params;
+        const { status, limit = 50 } = req.query;
+
+        // Find messages where user is author or recipient
+        const query = {
+            isDirectMessage: true,
+            $or: [
+                { author: { $regex: new RegExp(`^${username}$`, 'i') } },
+                { recipients: { $elemMatch: { $regex: new RegExp(`^${username}$`, 'i') } } }
+            ]
+        };
+
+        const messages = await FeedItem.find(query)
+            .sort({ timestamp: -1 })
+            .limit(parseInt(limit));
+
+        const results = messages.map(m => {
+            const userIsAuthor = m.author.toLowerCase() === username.toLowerCase();
+            const otherParty = userIsAuthor
+                ? m.recipients?.join(', ')
+                : m.author;
+            const relevantRecipient = userIsAuthor
+                ? m.recipients?.[0]
+                : username;
+
+            return {
+                messageId: m.id,
+                feedItemID: m.feedItemID,
+                title: m.title?.substring(0, 40),
+                direction: userIsAuthor ? 'sent' : 'received',
+                otherParty: otherParty,
+                timestamp: m.timestamp,
+                deliveryStatus: m.deliveryStatus?.[relevantRecipient] || 'unknown',
+                encryptedForKeyVersion: m.encryptedForKeyVersions?.[relevantRecipient] || 'unknown',
+                hasImage: !!m.encryptedImageId
+            };
+        });
+
+        // Filter by status if requested
+        const filtered = status
+            ? results.filter(r => r.deliveryStatus === status)
+            : results;
+
+        res.json({
+            username,
+            messageCount: filtered.length,
+            messages: filtered
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin user messages: ${error}`);
+        res.status(500).json({ error: 'Failed to get messages', details: error.message });
+    }
+});
+
+// v127: Admin action to force re-encryption notification
+app.post('/admin/message/:messageId/force-reencrypt', validateApiKey, async (req, res) => {
+    try {
+        const { messageId } = req.params;
+        const { recipientUsername, reason } = req.body;
+
+        if (!recipientUsername) {
+            return res.status(400).json({ error: 'Missing recipientUsername' });
+        }
+
+        const message = await FeedItem.findOne({ id: messageId });
+        if (!message) {
+            return res.status(404).json({ error: 'Message not found' });
+        }
+
+        const keyBundle = await SignalKeyBundle.findOne({
+            username: { $regex: new RegExp(`^${recipientUsername}$`, 'i') }
+        });
+
+        if (!keyBundle) {
+            return res.status(404).json({ error: 'Recipient key bundle not found' });
+        }
+
+        const oldKeyVersion = message.encryptedForKeyVersions?.[recipientUsername] || 1;
+        const newKeyVersion = keyBundle.keyVersion || 1;
+
+        console.log(`DEBUG-KEY-VERSION: Admin forcing re-encryption for message ${messageId.substring(0,8)}`);
+        console.log(`DEBUG-KEY-VERSION: Recipient ${recipientUsername}: v${oldKeyVersion} -> v${newKeyVersion}`);
+
+        // Create notification for sender
+        const notification = new KeyChangeNotification({
+            id: uuidv4(),
+            recipientUsername: recipientUsername,
+            senderUsername: message.author,
+            oldKeyVersion: oldKeyVersion,
+            newKeyVersion: newKeyVersion,
+            oldIdentityKeyFingerprint: 'admin-forced',
+            newIdentityKeyFingerprint: keyBundle.identityKeyFingerprint,
+            affectedMessageIds: [messageId],
+            affectedMessageCount: 1,
+            status: 'pending',
+            expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            processingLog: [{
+                action: 'admin_force_reencrypt',
+                timestamp: new Date(),
+                details: reason || 'Admin forced re-encryption'
+            }]
+        });
+
+        await notification.save();
+
+        // Update message status
+        await FeedItem.findOneAndUpdate(
+            { id: messageId },
+            { $set: { [`deliveryStatus.${recipientUsername}`]: 'needs_reencrypt' } }
+        );
+
+        res.json({
+            success: true,
+            notificationId: notification.id,
+            message: `Notification created for ${message.author} to re-encrypt for ${recipientUsername}`
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin force reencrypt: ${error}`);
+        res.status(500).json({ error: 'Failed to force re-encryption', details: error.message });
+    }
+});
+
+// v127: View all notifications with filtering
+app.get('/admin/notifications', validateApiKey, async (req, res) => {
+    try {
+        const { status, sender, recipient, limit = 100 } = req.query;
+
+        const query = {};
+        if (status) query.status = status;
+        if (sender) query.senderUsername = { $regex: new RegExp(`^${sender}$`, 'i') };
+        if (recipient) query.recipientUsername = { $regex: new RegExp(`^${recipient}$`, 'i') };
+
+        const notifications = await KeyChangeNotification.find(query)
+            .sort({ createdAt: -1 })
+            .limit(parseInt(limit));
+
+        res.json({
+            count: notifications.length,
+            notifications: notifications.map(n => ({
+                id: n.id,
+                sender: n.senderUsername,
+                recipient: n.recipientUsername,
+                status: n.status,
+                keyVersionChange: `v${n.oldKeyVersion} -> v${n.newKeyVersion}`,
+                affectedMessages: n.affectedMessageCount,
+                createdAt: n.createdAt,
+                sentAt: n.sentAt,
+                acknowledgedAt: n.acknowledgedAt,
+                sendAttempts: n.sendAttempts,
+                processingLog: n.processingLog
+            }))
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin notifications: ${error}`);
+        res.status(500).json({ error: 'Failed to get notifications', details: error.message });
+    }
+});
+
 // Feed operations endpoint
 app.post('/feed', validateApiKey, (req, res) => {
     const { sessionId, playerId, action, feedItem, feedItemId, commentCount } = req.body;
-    
+
     if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
         return res.status(404).json({ error: 'Session or player not found' });
     }
@@ -1616,16 +2289,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                     if (feedItem.chapterNumber) {
                         processedItem.chapterNumber = feedItem.chapterNumber;
                         console.log(`DEBUG-THEBOOK: Publishing item with chapterNumber=${feedItem.chapterNumber}`);
-                    }
-
-                    // ADD: Preserve isLibraryDocument property
-                    if (feedItem.isLibraryDocument !== undefined) {
-                        processedItem.isLibraryDocument = feedItem.isLibraryDocument;
-                    }
-
-                    // ADD: Preserve feedVisibilityOverride property
-                    if (feedItem.feedVisibilityOverride !== undefined) {
-                        processedItem.feedVisibilityOverride = feedItem.feedVisibilityOverride;
                     }
                 } catch (error) {
                     console.error("Error processing item:", error);
@@ -2159,16 +2822,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItem.chapterNumber !== undefined) {
                     processedItem.chapterNumber = feedItem.chapterNumber;
                     console.log(`DEBUG-THEBOOK: Updating item with chapterNumber=${feedItem.chapterNumber}`);
-                }
-
-                // ADDED: Preserve isLibraryDocument during updates
-                if (feedItem.isLibraryDocument !== undefined) {
-                    processedItem.isLibraryDocument = feedItem.isLibraryDocument;
-                }
-
-                // ADDED: Preserve feedVisibilityOverride during updates
-                if (feedItem.feedVisibilityOverride !== undefined) {
-                    processedItem.feedVisibilityOverride = feedItem.feedVisibilityOverride;
                 }
 
                 // CRITICAL: Explicitly preserve encryption fields during updates
@@ -2861,37 +3514,40 @@ if (!global.signalKeys) {
     global.signalKeys = {};
 }
 
-// Upload Signal key bundle
+// v127: DEPRECATED - Duplicate endpoint removed. Primary endpoint at line 1590 uses MongoDB.
+// This in-memory version was overriding the MongoDB version. Commented out to fix.
+/*
 app.post('/signal/upload-keys', validateApiKey, (req, res) => {
     const { username, keyBundle } = req.body;
-    
+
     if (!username || !keyBundle) {
         return res.status(400).json({ error: 'Missing username or keyBundle' });
     }
-    
+
     // Validate key bundle structure
     if (!keyBundle.registrationId || !keyBundle.deviceId || !keyBundle.identityKey ||
         !keyBundle.signedPreKeyId || !keyBundle.signedPreKeyPublic || !keyBundle.signedPreKeySignature ||
         !keyBundle.preKeys || !Array.isArray(keyBundle.preKeys)) {
         return res.status(400).json({ error: 'Invalid key bundle structure' });
     }
-    
+
     // Store the key bundle
     global.signalKeys[username] = {
         ...keyBundle,
         uploadedAt: new Date().toISOString()
     };
-    
+
     console.log(`DEBUG-SIGNAL-SERVER: Uploaded key bundle for ${username}`);
     console.log(`DEBUG-SIGNAL-SERVER: Registration ID: ${keyBundle.registrationId}, Device ID: ${keyBundle.deviceId}`);
     console.log(`DEBUG-SIGNAL-SERVER: PreKeys count: ${keyBundle.preKeys.length}`);
-    
+
     res.json({
         success: true,
         message: 'Key bundle uploaded successfully',
         username: username
     });
 });
+*/
 
 // Download Signal key bundle for a user
 app.get('/signal/keys/:username', validateApiKey, (req, res) => {
