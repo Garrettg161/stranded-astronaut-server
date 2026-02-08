@@ -1,9 +1,4 @@
-// Stranded Astronaut Server version 129
-// v129: Added Mux video fields to FeedItem MongoDB schema
-//   - muxPlaybackId, muxStreamId, isLiveStream, liveStreamStatus now persist to database
-// v128: Mux video integration - live stream and VOD endpoints
-//   - Added Mux SDK require with graceful fallback
-//   - New endpoints: /video/create-live-stream, /video/stream-status, /video/publish-stream, /video/upload-vod, /video/streams
+// Stranded Astronaut Server version 127
 // v127: Key versioning and message retry system
 //   - Added keyVersion and keyHistory to SignalKeyBundle
 //   - Added delivery tracking to FeedItem
@@ -30,19 +25,6 @@ try {
     console.log('Signal client library not installed - decrypt-test will not work');
 }
 
-// Mux Video SDK for live streaming and VOD
-let muxClient;
-try {
-    const Mux = require('@mux/mux-node');
-    muxClient = new Mux({
-        tokenId: process.env.MUX_TOKEN_ID,
-        tokenSecret: process.env.MUX_TOKEN_SECRET
-    });
-    console.log('Mux video SDK loaded successfully');
-} catch (error) {
-    console.log('Mux video SDK not installed - video endpoints will not work');
-}
-
 // Global variables
 let feedItemIdCounter = 1000; // Initial default value, will be properly set during initialization
 global.allFeedItems = [];
@@ -50,7 +32,6 @@ global.directMessages = {};
 global.usernameMappings = {};
 global.pendingDirectMessages = {};
 global.mediaContent = {};
-if (!global.muxStreams) global.muxStreams = {};
 const MAX_MEDIA_SIZE = 10 * 1024 * 1024;
 
 // MongoDB connection setup
@@ -72,11 +53,6 @@ const feedItemSchema = new mongoose.Schema({
    videoUrl: String,
    videoData: Buffer,
    videoContentType: String,
-   // Mux video fields (Phase 1 - Feb 2026)
-   muxPlaybackId: String,
-   muxStreamId: String,
-   isLiveStream: { type: Boolean, default: false },
-   liveStreamStatus: String,
    audioUrl: String,
    audioData: Buffer,
    audioContentType: String,
@@ -118,12 +94,7 @@ const feedItemSchema = new mongoose.Schema({
    encryptedImageId: String, // ID pointing to EncryptedImage collection
    encryptedImageKeysPerRecipient: mongoose.Schema.Types.Mixed, // Username -> Signal-encrypted AES key (JSON)
 
-   // v129: Added Mux video fields to FeedItem MongoDB schema
-//   - muxPlaybackId, muxStreamId, isLiveStream, liveStreamStatus now persist to database
-// v128: Mux video integration - live stream and VOD endpoints
-//   - Added Mux SDK require with graceful fallback
-//   - New endpoints: /video/create-live-stream, /video/stream-status, /video/publish-stream, /video/upload-vod, /video/streams
-// v127: Key versioning and delivery tracking
+   // v127: Key versioning and delivery tracking
    encryptedForKeyVersions: { type: mongoose.Schema.Types.Mixed, default: {} },
    deliveryStatus: { type: mongoose.Schema.Types.Mixed, default: {} },
    deliveryAttempts: { type: mongoose.Schema.Types.Mixed, default: {} },
@@ -159,12 +130,7 @@ const signalKeyBundleSchema = new mongoose.Schema({
    }],
    updatedAt: { type: Date, default: Date.now },
 
-   // v129: Added Mux video fields to FeedItem MongoDB schema
-//   - muxPlaybackId, muxStreamId, isLiveStream, liveStreamStatus now persist to database
-// v128: Mux video integration - live stream and VOD endpoints
-//   - Added Mux SDK require with graceful fallback
-//   - New endpoints: /video/create-live-stream, /video/stream-status, /video/publish-stream, /video/upload-vod, /video/streams
-// v127: Key versioning
+   // v127: Key versioning
    keyVersion: { type: Number, default: 1 },
    identityKeyFingerprint: { type: String },
    keyHistory: [{
@@ -3774,7 +3740,6 @@ app.post('/media/encrypted-image/upload', validateApiKey, (req, res) => {
             
             if (!global.mediaContent) {
                 global.mediaContent = {};
-if (!global.muxStreams) global.muxStreams = {};
             }
             
             global.mediaContent[imageId] = {
