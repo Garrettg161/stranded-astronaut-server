@@ -4100,6 +4100,52 @@ app.get('/video/stream-status/:streamId', validateApiKey, async (req, res) => {
     }
 });
 
+// Update live stream status on feed item (called by iOS app when going live / ending stream)
+app.patch('/video/update-stream-status', validateApiKey, async (req, res) => {
+    const { muxStreamId, status } = req.body;
+    console.log(`DEBUG-MUX: Update stream status request: ${muxStreamId} -> ${status}`);
+
+    if (!muxStreamId || !status) {
+        return res.status(400).json({
+            success: false,
+            error: 'Missing muxStreamId or status'
+        });
+    }
+
+    try {
+        const FeedItem = mongoose.model('FeedItem');
+        const result = await FeedItem.findOneAndUpdate(
+            { muxStreamId: muxStreamId },
+            { liveStreamStatus: status },
+            { new: true }
+        );
+
+        if (!result) {
+            console.log(`DEBUG-MUX: No feed item found with muxStreamId ${muxStreamId}`);
+            return res.status(404).json({
+                success: false,
+                error: 'No feed item found with that muxStreamId'
+            });
+        }
+
+        console.log(`DEBUG-MUX: Updated liveStreamStatus to ${status} for feed item ${result.feedItemID}`);
+        res.json({
+            success: true,
+            feedItemID: result.feedItemID,
+            muxStreamId: muxStreamId,
+            liveStreamStatus: status
+        });
+
+    } catch (error) {
+        console.error(`DEBUG-MUX: Update stream status failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to update stream status',
+            details: error.message
+        });
+    }
+});
+
 // List all active streams
 app.get('/video/streams', validateApiKey, async (req, res) => {
     console.log('DEBUG-MUX: List streams request');
