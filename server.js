@@ -2783,6 +2783,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                 console.log(`DEBUG-SYNC-SERVER: Delta sync request - items since ${sinceDate.toISOString()}`);
 
                 FeedItem.find({
+                    isDeleted: false,
                     $or: [
                         { updatedAt: { $gt: sinceDate } },
                         { updatedAt: null, timestamp: { $gt: sinceDate } }
