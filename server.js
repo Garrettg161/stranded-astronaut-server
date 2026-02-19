@@ -66,6 +66,7 @@ const feedItemSchema = new mongoose.Schema({
    authorId: { type: String, required: true },
    organization: { type: String, default: 'Resistance' },
    timestamp: { type: Date, default: Date.now },
+   updatedAt: { type: Date, default: Date.now },  // Delta sync - tracks last modification time
    imageUrl: String,
    imageData: Buffer,
    imageContentType: String,
@@ -315,7 +316,21 @@ function loadItemsFromDatabase() {
            .then(items => {
                console.log(`Loaded ${items.length} feed items from MongoDB`);
                global.allFeedItems = items;
-               
+
+               // One-time backfill of updatedAt for existing items
+               const itemsWithoutUpdatedAt = items.filter(item => !item.updatedAt);
+               if (itemsWithoutUpdatedAt.length > 0) {
+                   console.log(`Delta sync: Backfilling updatedAt for ${itemsWithoutUpdatedAt.length} existing items`);
+                   FeedItem.updateMany(
+                       { updatedAt: null },
+                       { $set: { updatedAt: new Date('2026-01-01T00:00:00Z') } }
+                   ).then(result => {
+                       console.log(`Delta sync: Backfilled updatedAt for ${result.modifiedCount} items`);
+                   }).catch(err => {
+                       console.error(`Delta sync: Backfill error: ${err}`);
+                   });
+               }
+
                // Rebuild global.mediaContent from stored binary data
                let restoredImageCount = 0;
                let restoredVideoCount = 0;
@@ -2307,6 +2322,9 @@ app.post('/feed', validateApiKey, (req, res) => {
                         processedItem.timestamp = new Date();
                     }
                     
+                    // Delta sync - set updatedAt to server time on publish
+                    processedItem.updatedAt = new Date();
+
                     // ADD THIS: Preserve isRepost property
                     if (feedItem.isRepost) {
                         processedItem.isRepost = true;
@@ -2345,7 +2363,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // FIXED: Look up parent by id instead of feedItemID
                     FeedItem.findOneAndUpdate(
                         { id: String(feedItem.parentId) },  // Changed from feedItemID to id
-                        { $inc: { commentCount: 1 } },
+                        { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
                         { new: true }
                     ).then(updatedParent => {
                         if (updatedParent) {
@@ -2376,6 +2394,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 global.allFeedItems[parentIndex].commentCount = 0;
                             }
                             global.allFeedItems[parentIndex].commentCount += 1;
+                            global.allFeedItems[parentIndex].updatedAt = new Date();
                             console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory only with count: ${global.allFeedItems[parentIndex].commentCount}`);
                         }
                     });
@@ -2755,9 +2774,71 @@ app.post('/feed', validateApiKey, (req, res) => {
 
         // Find the 'get' case in the switch statement of the /feed endpoint
         case 'get':
-            console.log("DEBUG-SYNC-SERVER: Handling 'get' feed request");
-            
-            // Try to get items from MongoDB first
+            // Delta sync support
+            const sinceTimestamp = req.body.sinceTimestamp;
+
+            if (sinceTimestamp) {
+                // DELTA SYNC: Return only items modified since the given timestamp
+                const sinceDate = new Date(sinceTimestamp);
+                console.log(`DEBUG-SYNC-SERVER: Delta sync request - items since ${sinceDate.toISOString()}`);
+
+                FeedItem.find({
+                    $or: [
+                        { updatedAt: { $gt: sinceDate } },
+                        { updatedAt: null, timestamp: { $gt: sinceDate } }
+                    ]
+                })
+                .select('-attributedContentData -imageData -videoData -audioData')
+                .then(items => {
+                    console.log(`DEBUG-SYNC-SERVER: Delta sync returning ${items.length} changed items (since ${sinceDate.toISOString()})`);
+
+                    const itemsForTransmission = items.map(item => {
+                        const itemObj = item.toObject();
+                        if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
+                            itemObj.encryptedData = itemObj.encryptedData.toString('base64');
+                        }
+                        return itemObj;
+                    });
+
+                    res.json({
+                        success: true,
+                        isDelta: true,
+                        sinceTimestamp: sinceTimestamp,
+                        serverTimestamp: new Date().toISOString(),
+                        feedItems: itemsForTransmission
+                    });
+                })
+                .catch(err => {
+                    console.error(`Delta sync error: ${err}`);
+                    // Fall back to full sync on error
+                    FeedItem.find({ isDeleted: false })
+                        .select('-attributedContentData -imageData -videoData -audioData')
+                        .then(allItems => {
+                            const itemsForTransmission = allItems.map(item => {
+                                const itemObj = item.toObject();
+                                if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
+                                    itemObj.encryptedData = itemObj.encryptedData.toString('base64');
+                                }
+                                return itemObj;
+                            });
+                            res.json({
+                                success: true,
+                                isDelta: false,
+                                serverTimestamp: new Date().toISOString(),
+                                feedItems: itemsForTransmission
+                            });
+                        })
+                        .catch(fallbackErr => {
+                            console.error(`Full sync fallback also failed: ${fallbackErr}`);
+                            res.json({ success: true, feedItems: [] });
+                        });
+                });
+                break;
+            }
+
+            console.log("DEBUG-SYNC-SERVER: Handling full 'get' feed request (no sinceTimestamp)");
+
+            // FULL SYNC (original behavior, backward compatible)
             // CRITICAL FIX: Exclude large binary fields to prevent OOM on Android
             FeedItem.find({ isDeleted: false })
                 .select('-attributedContentData -imageData -videoData -audioData')
@@ -2790,6 +2871,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // Return the transformed items
                     res.json({
                         success: true,
+                        isDelta: false,
+                        serverTimestamp: new Date().toISOString(),
                         feedItems: itemsForTransmission
                     });
                 })
@@ -2821,6 +2904,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                     
                     res.json({
                         success: true,
+                        isDelta: false,
+                        serverTimestamp: new Date().toISOString(),
                         feedItems: uniqueItems
                     });
                 });
@@ -2911,7 +2996,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.timestamp = new Date();
                     console.log(`Forcing new timestamp for edited item: ${processedItem.id}`);
                 }
-                
+
+                // Delta sync - update modification timestamp
+                processedItem.updatedAt = new Date();
+
                 // Update in MongoDB first
                 FeedItem.findOneAndUpdate(
                     { id: processedItem.id },
@@ -3094,7 +3182,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                 // Mark as deleted in MongoDB (soft delete)
                 FeedItem.findOneAndUpdate(
                     { id: feedItem.id },
-                    { isDeleted: true },
+                    { isDeleted: true, updatedAt: new Date() },
                     { new: true }
                 ).then(deletedItem => {
                     if (deletedItem) {
