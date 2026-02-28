@@ -1675,13 +1675,19 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
                 console.log(`DEBUG-KEY-VERSION: Old fingerprint: ${existingBundle.identityKeyFingerprint}, New: ${newFingerprint}`);
 
                 // Queue notifications for senders with undelivered messages
-                await queueKeyChangeNotifications(
-                    username,
-                    oldKeyVersion,
-                    newKeyVersion,
-                    existingBundle.identityKeyFingerprint,
-                    newFingerprint
-                );
+                // v128: Wrap in try-catch so notification failures don't block key upload
+                try {
+                    await queueKeyChangeNotifications(
+                        username,
+                        oldKeyVersion,
+                        newKeyVersion,
+                        existingBundle.identityKeyFingerprint,
+                        newFingerprint
+                    );
+                } catch (notifError) {
+                    console.error('DEBUG-KEY-VERSION: Notification queueing failed (non-fatal):', notifError.message);
+                    // Continue with key upload -- notifications are secondary
+                }
             } else {
                 newKeyVersion = oldKeyVersion;  // Same key, same version
                 console.log(`DEBUG-KEY-VERSION: Keys unchanged for ${username}, version stays at ${newKeyVersion}`);
