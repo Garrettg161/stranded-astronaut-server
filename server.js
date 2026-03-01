@@ -4062,7 +4062,9 @@ app.get('/downloadEncryptedImage/:imageId/:username', validateApiKey, async (req
         }
 
         // Get user's specific encrypted AES key
-        const userEncryptedKey = encryptedImage.encryptedKeysPerRecipient[username];
+        // v129: Case-insensitive lookup -- keys stored lowercase from encryption
+        const lowerUsername = username.toLowerCase();
+        const userEncryptedKey = encryptedImage.encryptedKeysPerRecipient[lowerUsername] || encryptedImage.encryptedKeysPerRecipient[username];
 
         if (!userEncryptedKey) {
             console.log(`DEBUG-HYBRID-IMAGE: ❌ No key found for user: ${username}`);
