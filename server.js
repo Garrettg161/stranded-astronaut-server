@@ -97,8 +97,6 @@ const feedItemSchema = new mongoose.Schema({
    isRepost: { type: Boolean, default: false },
    isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
    chapterNumber: String,  // Chapter numbering for TheBook (e.g., "1.1", "2.3")
-   isAIQuestion: { type: Boolean, default: false },  // AI Question feed item flag
-   aiQuestionText: String,  // Pre-written question text for AI injection
    metadata: mongoose.Schema.Types.Mixed,
    eventDescription: String,
    eventStartDate: Date,
@@ -2349,17 +2347,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                     if (feedItem.chapterNumber) {
                         processedItem.chapterNumber = feedItem.chapterNumber;
                         console.log(`DEBUG-THEBOOK: Publishing item with chapterNumber=${feedItem.chapterNumber}`);
-                    }
-
-                    // AI Question fields
-                    if (feedItem.isAIQuestion) {
-                        processedItem.isAIQuestion = true;
-                        console.log(`DEBUG-AIQUESTION: Publishing item with isAIQuestion=true`);
-                    }
-                    if (feedItem.aiQuestionText) {
-                        processedItem.aiQuestionText = feedItem.aiQuestionText;
-                        console.log(`DEBUG-AIQUESTION: Publishing item with aiQuestionText`);
-                    }
                     }
                 } catch (error) {
                     console.error("Error processing item:", error);
