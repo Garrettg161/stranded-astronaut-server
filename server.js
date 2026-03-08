@@ -4513,7 +4513,7 @@ app.get('/analytics/dashboard-ui/:orgId', async (req, res) => {
    + '  document.getElementById("app").innerHTML = h;\n'
    + '}\n'
    + 'loadData();\n'
-   + '</script></body></html>';\n'
+   + '</script></body></html>';
    res.setHeader('Content-Type', 'text/html');
    res.send(DASHBOARD_HTML);
 });
