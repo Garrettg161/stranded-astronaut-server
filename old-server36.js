@@ -1,5 +1,22 @@
-// Stranded Astronaut Server version 126
-// v126: Added isLibraryDocument and feedVisibilityOverride schema fields
+// Stranded Astronaut Server version 130
+// v130: Influencer Analytics Dashboard
+//   - PlotAnalyticsSummary MongoDB schema (org-level aggregated plot question stats)
+//   - POST /analytics/plot-event -- anonymous, unauthenticated, rate-limited per IP (100/hr)
+//   - GET /analytics/dashboard/:orgId -- authenticated, returns per-question stats (min 25 responses)
+//   - GET /analytics/dashboard-ui/:orgId -- serves HTML dashboard page
+// v129: Added Mux video fields to FeedItem MongoDB schema
+//   - muxPlaybackId, muxStreamId, isLiveStream, liveStreamStatus now persist to database
+// v128: Mux video integration - live stream and VOD endpoints
+//   - Added Mux SDK require with graceful fallback
+//   - New endpoints: /video/create-live-stream, /video/stream-status, /video/publish-stream, /video/upload-vod, /video/streams
+// v127: Key versioning and message retry system
+//   - Added keyVersion and keyHistory to SignalKeyBundle
+//   - Added delivery tracking to FeedItem
+//   - Added KeyChangeNotification schema
+//   - New endpoints: /notifications, /messages/mark-delivered, /messages/update-encryption
+//   - Admin endpoints: /admin/message/:id, /admin/user/:username/keys, /admin/user/:username/messages
+//   - Auto-detect key changes and queue re-encryption notifications
+// v126: (skipped - went from v125 to v127)
 // v125: Added chapterNumber schema field for TheBook chapter numbering (e.g., "1.1", "2.3")
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -18,6 +35,19 @@ try {
     console.log('Signal client library not installed - decrypt-test will not work');
 }
 
+// Mux Video SDK for live streaming and VOD
+let muxClient;
+try {
+    const Mux = require('@mux/mux-node');
+    muxClient = new Mux({
+        tokenId: process.env.MUX_TOKEN_ID,
+        tokenSecret: process.env.MUX_TOKEN_SECRET
+    });
+    console.log('Mux video SDK loaded successfully');
+} catch (error) {
+    console.log('Mux video SDK not installed - video endpoints will not work');
+}
+
 // Global variables
 let feedItemIdCounter = 1000; // Initial default value, will be properly set during initialization
 global.allFeedItems = [];
@@ -25,6 +55,7 @@ global.directMessages = {};
 global.usernameMappings = {};
 global.pendingDirectMessages = {};
 global.mediaContent = {};
+if (!global.muxStreams) global.muxStreams = {};
 const MAX_MEDIA_SIZE = 10 * 1024 * 1024;
 
 // MongoDB connection setup
@@ -40,12 +71,18 @@ const feedItemSchema = new mongoose.Schema({
    authorId: { type: String, required: true },
    organization: { type: String, default: 'Resistance' },
    timestamp: { type: Date, default: Date.now },
+   updatedAt: { type: Date, default: Date.now },  // Delta sync - tracks last modification time
    imageUrl: String,
    imageData: Buffer,
    imageContentType: String,
    videoUrl: String,
    videoData: Buffer,
    videoContentType: String,
+   // Mux video fields (Phase 1 - Feb 2026)
+   muxPlaybackId: String,
+   muxStreamId: String,
+   isLiveStream: { type: Boolean, default: false },
+   liveStreamStatus: String,
    audioUrl: String,
    audioData: Buffer,
    audioContentType: String,
@@ -65,8 +102,8 @@ const feedItemSchema = new mongoose.Schema({
    isRepost: { type: Boolean, default: false },
    isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
    chapterNumber: String,  // Chapter numbering for TheBook (e.g., "1.1", "2.3")
-   isLibraryDocument: { type: Boolean, default: false },  // Cannot be deleted by users
-   feedVisibilityOverride: { type: Boolean, default: null },  // false = hidden from feed but accessible via hotspots
+   isAIQuestion: { type: Boolean, default: false },  // AI Question feed item flag
+   aiQuestionText: String,  // Pre-written question text for AI injection
    metadata: mongoose.Schema.Types.Mixed,
    eventDescription: String,
    eventStartDate: Date,
@@ -87,7 +124,27 @@ const feedItemSchema = new mongoose.Schema({
    imageEncryptionKeys: mongoose.Schema.Types.Mixed,
    // Encrypted image fields (Phase 1 - Dec 2025)
    encryptedImageId: String, // ID pointing to EncryptedImage collection
-   encryptedImageKeysPerRecipient: mongoose.Schema.Types.Mixed // Username -> Signal-encrypted AES key (JSON)
+   encryptedImageKeysPerRecipient: mongoose.Schema.Types.Mixed, // Username -> Signal-encrypted AES key (JSON)
+
+   // v129: Added Mux video fields to FeedItem MongoDB schema
+//   - muxPlaybackId, muxStreamId, isLiveStream, liveStreamStatus now persist to database
+// v128: Mux video integration - live stream and VOD endpoints
+//   - Added Mux SDK require with graceful fallback
+//   - New endpoints: /video/create-live-stream, /video/stream-status, /video/publish-stream, /video/upload-vod, /video/streams
+// v127: Key versioning and delivery tracking
+   encryptedForKeyVersions: { type: mongoose.Schema.Types.Mixed, default: {} },
+   deliveryStatus: { type: mongoose.Schema.Types.Mixed, default: {} },
+   deliveryAttempts: { type: mongoose.Schema.Types.Mixed, default: {} },
+   deliveredAt: { type: mongoose.Schema.Types.Mixed, default: {} },
+   lastDeliveryAttempt: { type: mongoose.Schema.Types.Mixed, default: {} },
+   reencryptionHistory: [{
+      recipient: String,
+      fromKeyVersion: Number,
+      toKeyVersion: Number,
+      reencryptedAt: Date,
+      reencryptedBy: String,
+      success: Boolean
+   }]
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
@@ -108,7 +165,24 @@ const signalKeyBundleSchema = new mongoose.Schema({
       id: { type: Number, required: true },
       publicKey: { type: String, required: true } // Base64 encoded
    }],
-   updatedAt: { type: Date, default: Date.now }
+   updatedAt: { type: Date, default: Date.now },
+
+   // v129: Added Mux video fields to FeedItem MongoDB schema
+//   - muxPlaybackId, muxStreamId, isLiveStream, liveStreamStatus now persist to database
+// v128: Mux video integration - live stream and VOD endpoints
+//   - Added Mux SDK require with graceful fallback
+//   - New endpoints: /video/create-live-stream, /video/stream-status, /video/publish-stream, /video/upload-vod, /video/streams
+// v127: Key versioning
+   keyVersion: { type: Number, default: 1 },
+   identityKeyFingerprint: { type: String },
+   keyHistory: [{
+      keyVersion: Number,
+      identityKey: String,
+      identityKeyFingerprint: String,
+      uploadedAt: Date,
+      uploadSource: String,
+      preKeyCount: Number
+   }]
 });
 
 const SignalKeyBundle = mongoose.model('SignalKeyBundle', signalKeyBundleSchema);
@@ -128,6 +202,133 @@ const encryptedImageSchema = new mongoose.Schema({
 
 const EncryptedImage = mongoose.model('EncryptedImage', encryptedImageSchema);
 
+// v130: Plot analytics schema -- aggregate counts per org+question, no raw events stored
+const plotAnalyticsSummarySchema = new mongoose.Schema({
+   orgId:          { type: String, required: true },
+   questionNumber: { type: String, required: true },
+   questionText:   { type: String, default: '' },
+   section:        { type: Number, default: 0 },
+   yesCount:       { type: Number, default: 0 },
+   noCount:        { type: Number, default: 0 },
+   updatedAt:      { type: Date, default: Date.now }
+});
+plotAnalyticsSummarySchema.index({ orgId: 1, questionNumber: 1 }, { unique: true });
+const PlotAnalyticsSummary = mongoose.model('PlotAnalyticsSummary', plotAnalyticsSummarySchema);
+
+// v127: Key change notification schema
+const keyChangeNotificationSchema = new mongoose.Schema({
+   id: { type: String, required: true, unique: true, index: true },
+   recipientUsername: { type: String, required: true, index: true },
+   senderUsername: { type: String, required: true, index: true },
+   oldKeyVersion: { type: Number, required: true },
+   newKeyVersion: { type: Number, required: true },
+   oldIdentityKeyFingerprint: String,
+   newIdentityKeyFingerprint: String,
+   affectedMessageIds: [String],
+   affectedMessageCount: { type: Number, default: 0 },
+   status: {
+      type: String,
+      enum: ['pending', 'sent', 'acknowledged', 'reencrypted', 'failed', 'expired'],
+      default: 'pending'
+   },
+   createdAt: { type: Date, default: Date.now },
+   sentAt: Date,
+   acknowledgedAt: Date,
+   reencryptedAt: Date,
+   expiresAt: Date,
+   sendAttempts: { type: Number, default: 0 },
+   lastSendAttempt: Date,
+   processingLog: [{
+      action: String,
+      timestamp: Date,
+      details: String
+   }]
+});
+
+keyChangeNotificationSchema.index({ recipientUsername: 1, status: 1 });
+keyChangeNotificationSchema.index({ senderUsername: 1, status: 1 });
+keyChangeNotificationSchema.index({ createdAt: 1 });
+
+const KeyChangeNotification = mongoose.model('KeyChangeNotification', keyChangeNotificationSchema);
+
+// v127: Calculate identity key fingerprint
+const crypto = require('crypto');
+function calculateKeyFingerprint(identityKey) {
+   return crypto
+      .createHash('sha256')
+      .update(identityKey)
+      .digest('hex')
+      .substring(0, 16);
+}
+
+// v127: Queue notifications when keys change
+async function queueKeyChangeNotifications(username, oldKeyVersion, newKeyVersion, oldFingerprint, newFingerprint) {
+   console.log(`DEBUG-KEY-VERSION: Checking for undelivered messages to ${username}`);
+
+   // Find all undelivered messages TO this user (case-insensitive)
+   const undeliveredMessages = await FeedItem.find({
+      isDirectMessage: true,
+      recipients: { $elemMatch: { $regex: new RegExp(`^${username}$`, 'i') } }
+   });
+
+   // Filter to only those without 'delivered' status for this user
+   const needsReencrypt = undeliveredMessages.filter(msg => {
+      const status = msg.deliveryStatus?.[username] || msg.deliveryStatus?.[username.toLowerCase()];
+      return !status || status === 'pending' || status === 'failed';
+   });
+
+   if (needsReencrypt.length === 0) {
+      console.log(`DEBUG-KEY-VERSION: No undelivered messages for ${username} - no notifications needed`);
+      return;
+   }
+
+   console.log(`DEBUG-KEY-VERSION: Found ${needsReencrypt.length} undelivered messages for ${username}`);
+
+   // Group by sender
+   const messagesBySender = {};
+   needsReencrypt.forEach(msg => {
+      const sender = msg.author;
+      if (!messagesBySender[sender]) {
+         messagesBySender[sender] = [];
+      }
+      messagesBySender[sender].push(msg.id);
+   });
+
+   // Create notification for each sender
+   for (const [sender, messageIds] of Object.entries(messagesBySender)) {
+      const notification = new KeyChangeNotification({
+         id: uuidv4(),
+         recipientUsername: username,
+         senderUsername: sender,
+         oldKeyVersion: oldKeyVersion,
+         newKeyVersion: newKeyVersion,
+         oldIdentityKeyFingerprint: oldFingerprint,
+         newIdentityKeyFingerprint: newFingerprint,
+         affectedMessageIds: messageIds,
+         affectedMessageCount: messageIds.length,
+         status: 'pending',
+         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+         processingLog: [{
+            action: 'created',
+            timestamp: new Date(),
+            details: `Key change detected: ${messageIds.length} messages need re-encryption`
+         }]
+      });
+
+      await notification.save();
+
+      // Mark affected messages as needing re-encryption
+      for (const msgId of messageIds) {
+         await FeedItem.findOneAndUpdate(
+            { id: msgId },
+            { $set: { [`deliveryStatus.${username}`]: 'needs_reencrypt' } }
+         );
+      }
+
+      console.log(`DEBUG-KEY-VERSION: Queued notification for ${sender}: ${messageIds.length} messages to ${username}`);
+   }
+}
+
 // Function to load items from MongoDB at startup
 function loadItemsFromDatabase() {
    return new Promise((resolve, reject) => {
@@ -135,7 +336,21 @@ function loadItemsFromDatabase() {
            .then(items => {
                console.log(`Loaded ${items.length} feed items from MongoDB`);
                global.allFeedItems = items;
-               
+
+               // One-time backfill of updatedAt for existing items
+               const itemsWithoutUpdatedAt = items.filter(item => !item.updatedAt);
+               if (itemsWithoutUpdatedAt.length > 0) {
+                   console.log(`Delta sync: Backfilling updatedAt for ${itemsWithoutUpdatedAt.length} existing items`);
+                   FeedItem.updateMany(
+                       { updatedAt: null },
+                       { $set: { updatedAt: new Date('2026-01-01T00:00:00Z') } }
+                   ).then(result => {
+                       console.log(`Delta sync: Backfilled updatedAt for ${result.modifiedCount} items`);
+                   }).catch(err => {
+                       console.error(`Delta sync: Backfill error: ${err}`);
+                   });
+               }
+
                // Rebuild global.mediaContent from stored binary data
                let restoredImageCount = 0;
                let restoredVideoCount = 0;
@@ -244,6 +459,27 @@ const validateApiKey = (req, res, next) => {
    
    next();
 };
+
+// v130: Simple in-memory rate limiter for anonymous analytics endpoint (100 req/hr per IP)
+const analyticsRateLimit = (() => {
+   const counts = new Map();
+   const WINDOW_MS = 60 * 60 * 1000;
+   const MAX_REQUESTS = 100;
+   return (req, res, next) => {
+      const ip = req.ip || req.connection.remoteAddress || 'unknown';
+      const now = Date.now();
+      const entry = counts.get(ip);
+      if (!entry || (now - entry.windowStart) > WINDOW_MS) {
+         counts.set(ip, { count: 1, windowStart: now });
+         return next();
+      }
+      if (entry.count >= MAX_REQUESTS) {
+         return res.status(429).json({ error: 'Rate limit exceeded' });
+      }
+      entry.count++;
+      return next();
+   };
+})();
 
 // Test endpoint to check the current state of feedItemIdCounter
 app.get('/debug/counter', validateApiKey, (req, res) => {
@@ -1440,25 +1676,78 @@ app.post('/directMessages', validateApiKey, (req, res) => {
 // SIGNAL PROTOCOL ENDPOINTS
 // ========================================
 
-// Upload Signal key bundle
+// v127: Enhanced key upload with versioning and change detection
 app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
     try {
-        const { username, keyBundle } = req.body;
-        
+        const { username, keyBundle, source } = req.body;
+
         if (!username || !keyBundle) {
             return res.status(400).json({ error: 'Missing username or keyBundle' });
         }
-        
+
         // Validate key bundle structure
         if (!keyBundle.registrationId || !keyBundle.deviceId || !keyBundle.identityKey ||
             !keyBundle.signedPreKeyId || !keyBundle.signedPreKeyPublic || !keyBundle.signedPreKeySignature ||
             !keyBundle.preKeys || !Array.isArray(keyBundle.preKeys)) {
             return res.status(400).json({ error: 'Invalid key bundle structure' });
         }
-        
+
         console.log(`DEBUG-SIGNAL: Uploading keys for ${username}, preKeys count: ${keyBundle.preKeys.length}`);
-        
-        // Upsert the key bundle (update if exists, insert if new)
+
+        // Get existing bundle for comparison
+        const existingBundle = await SignalKeyBundle.findOne({ username: username });
+
+        // Calculate new fingerprint
+        const newFingerprint = calculateKeyFingerprint(keyBundle.identityKey);
+
+        let keyChanged = false;
+        let oldKeyVersion = 0;
+        let newKeyVersion = 1;
+
+        if (existingBundle) {
+            oldKeyVersion = existingBundle.keyVersion || 1;
+
+            // Check if identity key changed
+            if (existingBundle.identityKeyFingerprint && existingBundle.identityKeyFingerprint !== newFingerprint) {
+                keyChanged = true;
+                newKeyVersion = oldKeyVersion + 1;
+
+                console.log(`DEBUG-KEY-VERSION: KEY CHANGE DETECTED for ${username}: v${oldKeyVersion} -> v${newKeyVersion}`);
+                console.log(`DEBUG-KEY-VERSION: Old fingerprint: ${existingBundle.identityKeyFingerprint}, New: ${newFingerprint}`);
+
+                // Queue notifications for senders with undelivered messages
+                // v128: Wrap in try-catch so notification failures don't block key upload
+                try {
+                    await queueKeyChangeNotifications(
+                        username,
+                        oldKeyVersion,
+                        newKeyVersion,
+                        existingBundle.identityKeyFingerprint,
+                        newFingerprint
+                    );
+                } catch (notifError) {
+                    console.error('DEBUG-KEY-VERSION: Notification queueing failed (non-fatal):', notifError.message);
+                    // Continue with key upload -- notifications are secondary
+                }
+            } else {
+                newKeyVersion = oldKeyVersion;  // Same key, same version
+                console.log(`DEBUG-KEY-VERSION: Keys unchanged for ${username}, version stays at ${newKeyVersion}`);
+            }
+        } else {
+            console.log(`DEBUG-KEY-VERSION: First key upload for ${username}, version = 1`);
+        }
+
+        // Build key history entry
+        const historyEntry = {
+            keyVersion: newKeyVersion,
+            identityKey: keyBundle.identityKey,
+            identityKeyFingerprint: newFingerprint,
+            uploadedAt: new Date(),
+            uploadSource: source || 'unknown',
+            preKeyCount: keyBundle.preKeys.length
+        };
+
+        // Upsert the key bundle
         await SignalKeyBundle.findOneAndUpdate(
             { username: username },
             {
@@ -1473,14 +1762,25 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
                 kyberPreKeyPublic: keyBundle.kyberPreKeyPublic,
                 kyberPreKeySignature: keyBundle.kyberPreKeySignature,
                 preKeys: keyBundle.preKeys,
-                updatedAt: new Date()
+                updatedAt: new Date(),
+                keyVersion: newKeyVersion,
+                identityKeyFingerprint: newFingerprint,
+                $push: { keyHistory: historyEntry }
             },
             { upsert: true, new: true }
         );
-        
-        console.log(`DEBUG-SIGNAL: Successfully stored key bundle for ${username}`);
-        res.json({ success: true, message: 'Key bundle uploaded successfully' });
-        
+
+        console.log(`DEBUG-SIGNAL: Successfully stored key bundle for ${username} (v${newKeyVersion})`);
+
+        res.json({
+            success: true,
+            message: keyChanged
+                ? `Key updated to version ${newKeyVersion}. Notifications queued for senders.`
+                : `Key bundle uploaded (version ${newKeyVersion})`,
+            keyVersion: newKeyVersion,
+            keyChanged: keyChanged
+        });
+
     } catch (error) {
         console.error(`ERROR uploading Signal keys: ${error}`);
         res.status(500).json({ error: 'Failed to upload key bundle', details: error.message });
@@ -1558,10 +1858,479 @@ app.delete('/signal/keys/:username', validateApiKey, async (req, res) => {
     }
 });
 
+// ========================================
+// v127: KEY VERSIONING AND NOTIFICATION ENDPOINTS
+// ========================================
+
+// v127: Get pending notifications for a sender
+app.get('/notifications', validateApiKey, async (req, res) => {
+    try {
+        const { username } = req.query;
+
+        if (!username) {
+            return res.status(400).json({ error: 'Missing username parameter' });
+        }
+
+        console.log(`DEBUG-KEY-VERSION: Fetching notifications for sender ${username}`);
+
+        // Get pending notifications for this sender (case-insensitive)
+        const notifications = await KeyChangeNotification.find({
+            senderUsername: { $regex: new RegExp(`^${username}$`, 'i') },
+            status: { $in: ['pending', 'sent'] }
+        }).sort({ createdAt: 1 });
+
+        if (notifications.length > 0) {
+            // Mark as sent
+            const notificationIds = notifications.map(n => n.id);
+            await KeyChangeNotification.updateMany(
+                { id: { $in: notificationIds } },
+                {
+                    status: 'sent',
+                    sentAt: new Date(),
+                    $inc: { sendAttempts: 1 },
+                    lastSendAttempt: new Date()
+                }
+            );
+
+            console.log(`DEBUG-KEY-VERSION: Returning ${notifications.length} notifications for ${username}`);
+        }
+
+        res.json({
+            notifications: notifications.map(n => ({
+                id: n.id,
+                type: 'KEY_CHANGED',
+                recipientUsername: n.recipientUsername,
+                oldKeyVersion: n.oldKeyVersion,
+                newKeyVersion: n.newKeyVersion,
+                affectedMessageIds: n.affectedMessageIds,
+                affectedMessageCount: n.affectedMessageCount,
+                createdAt: n.createdAt
+            }))
+        });
+
+    } catch (error) {
+        console.error(`ERROR fetching notifications: ${error}`);
+        res.status(500).json({ error: 'Failed to fetch notifications', details: error.message });
+    }
+});
+
+// v127: Acknowledge processing of a notification
+app.post('/notifications/acknowledge', validateApiKey, async (req, res) => {
+    try {
+        const { notificationId, action, success, details } = req.body;
+
+        if (!notificationId) {
+            return res.status(400).json({ error: 'Missing notificationId' });
+        }
+
+        const notification = await KeyChangeNotification.findOne({ id: notificationId });
+        if (!notification) {
+            return res.status(404).json({ error: 'Notification not found' });
+        }
+
+        console.log(`DEBUG-KEY-VERSION: Acknowledging notification ${notificationId}: ${action}, success=${success}`);
+
+        // Update notification status
+        await KeyChangeNotification.findOneAndUpdate(
+            { id: notificationId },
+            {
+                status: success ? 'reencrypted' : 'failed',
+                acknowledgedAt: new Date(),
+                reencryptedAt: success ? new Date() : null,
+                $push: {
+                    processingLog: {
+                        action: action || 'acknowledge',
+                        timestamp: new Date(),
+                        details: details || (success ? 'Re-encryption successful' : 'Re-encryption failed')
+                    }
+                }
+            }
+        );
+
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error(`ERROR acknowledging notification: ${error}`);
+        res.status(500).json({ error: 'Failed to acknowledge notification', details: error.message });
+    }
+});
+
+// v127: Mark a message as successfully delivered/decrypted
+app.post('/messages/mark-delivered', validateApiKey, async (req, res) => {
+    try {
+        const { messageId, recipientUsername } = req.body;
+
+        if (!messageId || !recipientUsername) {
+            return res.status(400).json({ error: 'Missing messageId or recipientUsername' });
+        }
+
+        console.log(`DEBUG-KEY-VERSION: Marking message ${messageId.substring(0,8)} delivered to ${recipientUsername}`);
+
+        // Update delivery status
+        const result = await FeedItem.findOneAndUpdate(
+            { id: messageId },
+            {
+                $set: {
+                    [`deliveryStatus.${recipientUsername}`]: 'delivered',
+                    [`deliveredAt.${recipientUsername}`]: new Date()
+                },
+                $inc: {
+                    [`deliveryAttempts.${recipientUsername}`]: 1
+                }
+            },
+            { new: true }
+        );
+
+        if (!result) {
+            return res.status(404).json({ error: 'Message not found' });
+        }
+
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error(`ERROR marking message delivered: ${error}`);
+        res.status(500).json({ error: 'Failed to mark delivered', details: error.message });
+    }
+});
+
+// v127: Update encrypted data after re-encryption
+app.post('/messages/update-encryption', validateApiKey, async (req, res) => {
+    try {
+        const {
+            messageId,
+            recipientUsername,
+            newEncryptedData,
+            newKeyVersion,
+            newEncryptedImageKey  // Optional, for image DMs
+        } = req.body;
+
+        if (!messageId || !recipientUsername || !newEncryptedData) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        const message = await FeedItem.findOne({ id: messageId });
+        if (!message) {
+            return res.status(404).json({ error: 'Message not found' });
+        }
+
+        // Get old key version for audit
+        const oldKeyVersion = message.encryptedForKeyVersions?.[recipientUsername] || 1;
+
+        console.log(`DEBUG-KEY-VERSION: Updating encryption for message ${messageId.substring(0,8)}`);
+        console.log(`DEBUG-KEY-VERSION: Recipient ${recipientUsername}: v${oldKeyVersion} -> v${newKeyVersion}`);
+
+        // Build update operations
+        const updateOps = {
+            $set: {
+                [`encryptedDataPerRecipient.${recipientUsername}`]: newEncryptedData,
+                [`encryptedForKeyVersions.${recipientUsername}`]: newKeyVersion,
+                [`deliveryStatus.${recipientUsername}`]: 'pending',
+                [`lastDeliveryAttempt.${recipientUsername}`]: new Date()
+            },
+            $push: {
+                reencryptionHistory: {
+                    recipient: recipientUsername,
+                    fromKeyVersion: oldKeyVersion,
+                    toKeyVersion: newKeyVersion,
+                    reencryptedAt: new Date(),
+                    reencryptedBy: message.author,
+                    success: true
+                }
+            }
+        };
+
+        // Also update image key if provided
+        if (newEncryptedImageKey) {
+            updateOps.$set[`encryptedImageKeysPerRecipient.${recipientUsername}`] = newEncryptedImageKey;
+            console.log(`DEBUG-KEY-VERSION: Also updating encrypted image key for ${recipientUsername}`);
+        }
+
+        await FeedItem.findOneAndUpdate({ id: messageId }, updateOps);
+
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error(`ERROR updating encryption: ${error}`);
+        res.status(500).json({ error: 'Failed to update encryption', details: error.message });
+    }
+});
+
+// ========================================
+// v127: ADMIN DIAGNOSTIC ENDPOINTS
+// ========================================
+
+// v127: Get full diagnostic info for a message
+app.get('/admin/message/:messageId', validateApiKey, async (req, res) => {
+    try {
+        const { messageId } = req.params;
+
+        const message = await FeedItem.findOne({ id: messageId });
+        if (!message) {
+            return res.status(404).json({ error: 'Message not found' });
+        }
+
+        // Build diagnostic info for each recipient
+        const recipientDiagnostics = [];
+        for (const recipient of (message.recipients || [])) {
+            const keyBundle = await SignalKeyBundle.findOne({
+                username: { $regex: new RegExp(`^${recipient}$`, 'i') }
+            });
+
+            const encryptedForVersion = message.encryptedForKeyVersions?.[recipient] || 'unknown';
+            const currentVersion = keyBundle?.keyVersion || 'unknown';
+            const keyMatch = encryptedForVersion === currentVersion;
+
+            recipientDiagnostics.push({
+                recipient,
+                encryptedForKeyVersion: encryptedForVersion,
+                currentKeyVersion: currentVersion,
+                keyVersionMatch: keyMatch,
+                deliveryStatus: message.deliveryStatus?.[recipient] || 'unknown',
+                deliveredAt: message.deliveredAt?.[recipient] || null,
+                deliveryAttempts: message.deliveryAttempts?.[recipient] || 0,
+                hasEncryptedData: !!message.encryptedDataPerRecipient?.[recipient],
+                hasEncryptedImageKey: !!message.encryptedImageKeysPerRecipient?.[recipient],
+                recommendation: keyMatch
+                    ? 'Keys match - should decrypt'
+                    : 'KEY MISMATCH - needs re-encryption'
+            });
+        }
+
+        // Get related notifications
+        const notifications = await KeyChangeNotification.find({
+            affectedMessageIds: messageId
+        });
+
+        res.json({
+            messageId: message.id,
+            feedItemID: message.feedItemID,
+            title: message.title?.substring(0, 50),
+            content: message.content?.substring(0, 100),
+            author: message.author,
+            recipients: message.recipients,
+            timestamp: message.timestamp,
+            encryptionStatus: message.encryptionStatus,
+            hasEncryptedImage: !!message.encryptedImageId,
+            recipientDiagnostics,
+            reencryptionHistory: message.reencryptionHistory || [],
+            relatedNotifications: notifications.map(n => ({
+                id: n.id,
+                status: n.status,
+                createdAt: n.createdAt,
+                sender: n.senderUsername
+            }))
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin message diagnostic: ${error}`);
+        res.status(500).json({ error: 'Failed to get diagnostic', details: error.message });
+    }
+});
+
+// v127: Get full key history for a user
+app.get('/admin/user/:username/keys', validateApiKey, async (req, res) => {
+    try {
+        const { username } = req.params;
+
+        const keyBundle = await SignalKeyBundle.findOne({
+            username: { $regex: new RegExp(`^${username}$`, 'i') }
+        });
+
+        if (!keyBundle) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        res.json({
+            username: keyBundle.username,
+            currentKeyVersion: keyBundle.keyVersion || 1,
+            currentIdentityFingerprint: keyBundle.identityKeyFingerprint || 'not tracked',
+            currentPreKeyCount: keyBundle.preKeys?.length || 0,
+            registrationId: keyBundle.registrationId,
+            lastUpdated: keyBundle.updatedAt,
+            keyHistory: (keyBundle.keyHistory || []).map(h => ({
+                keyVersion: h.keyVersion,
+                fingerprint: h.identityKeyFingerprint,
+                uploadedAt: h.uploadedAt,
+                source: h.uploadSource,
+                preKeyCount: h.preKeyCount
+            })),
+            totalKeyChanges: Math.max(0, (keyBundle.keyHistory?.length || 1) - 1)
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin user keys: ${error}`);
+        res.status(500).json({ error: 'Failed to get key history', details: error.message });
+    }
+});
+
+// v127: Get all messages involving a user with delivery status
+app.get('/admin/user/:username/messages', validateApiKey, async (req, res) => {
+    try {
+        const { username } = req.params;
+        const { status, limit = 50 } = req.query;
+
+        // Find messages where user is author or recipient
+        const query = {
+            isDirectMessage: true,
+            $or: [
+                { author: { $regex: new RegExp(`^${username}$`, 'i') } },
+                { recipients: { $elemMatch: { $regex: new RegExp(`^${username}$`, 'i') } } }
+            ]
+        };
+
+        const messages = await FeedItem.find(query)
+            .sort({ timestamp: -1 })
+            .limit(parseInt(limit));
+
+        const results = messages.map(m => {
+            const userIsAuthor = m.author.toLowerCase() === username.toLowerCase();
+            const otherParty = userIsAuthor
+                ? m.recipients?.join(', ')
+                : m.author;
+            const relevantRecipient = userIsAuthor
+                ? m.recipients?.[0]
+                : username;
+
+            return {
+                messageId: m.id,
+                feedItemID: m.feedItemID,
+                title: m.title?.substring(0, 40),
+                direction: userIsAuthor ? 'sent' : 'received',
+                otherParty: otherParty,
+                timestamp: m.timestamp,
+                deliveryStatus: m.deliveryStatus?.[relevantRecipient] || 'unknown',
+                encryptedForKeyVersion: m.encryptedForKeyVersions?.[relevantRecipient] || 'unknown',
+                hasImage: !!m.encryptedImageId
+            };
+        });
+
+        // Filter by status if requested
+        const filtered = status
+            ? results.filter(r => r.deliveryStatus === status)
+            : results;
+
+        res.json({
+            username,
+            messageCount: filtered.length,
+            messages: filtered
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin user messages: ${error}`);
+        res.status(500).json({ error: 'Failed to get messages', details: error.message });
+    }
+});
+
+// v127: Admin action to force re-encryption notification
+app.post('/admin/message/:messageId/force-reencrypt', validateApiKey, async (req, res) => {
+    try {
+        const { messageId } = req.params;
+        const { recipientUsername, reason } = req.body;
+
+        if (!recipientUsername) {
+            return res.status(400).json({ error: 'Missing recipientUsername' });
+        }
+
+        const message = await FeedItem.findOne({ id: messageId });
+        if (!message) {
+            return res.status(404).json({ error: 'Message not found' });
+        }
+
+        const keyBundle = await SignalKeyBundle.findOne({
+            username: { $regex: new RegExp(`^${recipientUsername}$`, 'i') }
+        });
+
+        if (!keyBundle) {
+            return res.status(404).json({ error: 'Recipient key bundle not found' });
+        }
+
+        const oldKeyVersion = message.encryptedForKeyVersions?.[recipientUsername] || 1;
+        const newKeyVersion = keyBundle.keyVersion || 1;
+
+        console.log(`DEBUG-KEY-VERSION: Admin forcing re-encryption for message ${messageId.substring(0,8)}`);
+        console.log(`DEBUG-KEY-VERSION: Recipient ${recipientUsername}: v${oldKeyVersion} -> v${newKeyVersion}`);
+
+        // Create notification for sender
+        const notification = new KeyChangeNotification({
+            id: uuidv4(),
+            recipientUsername: recipientUsername,
+            senderUsername: message.author,
+            oldKeyVersion: oldKeyVersion,
+            newKeyVersion: newKeyVersion,
+            oldIdentityKeyFingerprint: 'admin-forced',
+            newIdentityKeyFingerprint: keyBundle.identityKeyFingerprint,
+            affectedMessageIds: [messageId],
+            affectedMessageCount: 1,
+            status: 'pending',
+            expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            processingLog: [{
+                action: 'admin_force_reencrypt',
+                timestamp: new Date(),
+                details: reason || 'Admin forced re-encryption'
+            }]
+        });
+
+        await notification.save();
+
+        // Update message status
+        await FeedItem.findOneAndUpdate(
+            { id: messageId },
+            { $set: { [`deliveryStatus.${recipientUsername}`]: 'needs_reencrypt' } }
+        );
+
+        res.json({
+            success: true,
+            notificationId: notification.id,
+            message: `Notification created for ${message.author} to re-encrypt for ${recipientUsername}`
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin force reencrypt: ${error}`);
+        res.status(500).json({ error: 'Failed to force re-encryption', details: error.message });
+    }
+});
+
+// v127: View all notifications with filtering
+app.get('/admin/notifications', validateApiKey, async (req, res) => {
+    try {
+        const { status, sender, recipient, limit = 100 } = req.query;
+
+        const query = {};
+        if (status) query.status = status;
+        if (sender) query.senderUsername = { $regex: new RegExp(`^${sender}$`, 'i') };
+        if (recipient) query.recipientUsername = { $regex: new RegExp(`^${recipient}$`, 'i') };
+
+        const notifications = await KeyChangeNotification.find(query)
+            .sort({ createdAt: -1 })
+            .limit(parseInt(limit));
+
+        res.json({
+            count: notifications.length,
+            notifications: notifications.map(n => ({
+                id: n.id,
+                sender: n.senderUsername,
+                recipient: n.recipientUsername,
+                status: n.status,
+                keyVersionChange: `v${n.oldKeyVersion} -> v${n.newKeyVersion}`,
+                affectedMessages: n.affectedMessageCount,
+                createdAt: n.createdAt,
+                sentAt: n.sentAt,
+                acknowledgedAt: n.acknowledgedAt,
+                sendAttempts: n.sendAttempts,
+                processingLog: n.processingLog
+            }))
+        });
+
+    } catch (error) {
+        console.error(`ERROR in admin notifications: ${error}`);
+        res.status(500).json({ error: 'Failed to get notifications', details: error.message });
+    }
+});
+
 // Feed operations endpoint
 app.post('/feed', validateApiKey, (req, res) => {
     const { sessionId, playerId, action, feedItem, feedItemId, commentCount } = req.body;
-    
+
     if (!gameSessions[sessionId] || !gameSessions[sessionId].players[playerId]) {
         return res.status(404).json({ error: 'Session or player not found' });
     }
@@ -1600,6 +2369,9 @@ app.post('/feed', validateApiKey, (req, res) => {
                         processedItem.timestamp = new Date();
                     }
                     
+                    // Delta sync - set updatedAt to server time on publish
+                    processedItem.updatedAt = new Date();
+
                     // ADD THIS: Preserve isRepost property
                     if (feedItem.isRepost) {
                         processedItem.isRepost = true;
@@ -1618,14 +2390,14 @@ app.post('/feed', validateApiKey, (req, res) => {
                         console.log(`DEBUG-THEBOOK: Publishing item with chapterNumber=${feedItem.chapterNumber}`);
                     }
 
-                    // ADD: Preserve isLibraryDocument property
-                    if (feedItem.isLibraryDocument !== undefined) {
-                        processedItem.isLibraryDocument = feedItem.isLibraryDocument;
+                    // AI Question fields
+                    if (feedItem.isAIQuestion) {
+                        processedItem.isAIQuestion = true;
+                        console.log(`DEBUG-AIQUESTION: Publishing item with isAIQuestion=true`);
                     }
-
-                    // ADD: Preserve feedVisibilityOverride property
-                    if (feedItem.feedVisibilityOverride !== undefined) {
-                        processedItem.feedVisibilityOverride = feedItem.feedVisibilityOverride;
+                    if (feedItem.aiQuestionText) {
+                        processedItem.aiQuestionText = feedItem.aiQuestionText;
+                        console.log(`DEBUG-AIQUESTION: Publishing item with aiQuestionText`);
                     }
                 } catch (error) {
                     console.error("Error processing item:", error);
@@ -1648,7 +2420,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // FIXED: Look up parent by id instead of feedItemID
                     FeedItem.findOneAndUpdate(
                         { id: String(feedItem.parentId) },  // Changed from feedItemID to id
-                        { $inc: { commentCount: 1 } },
+                        { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
                         { new: true }
                     ).then(updatedParent => {
                         if (updatedParent) {
@@ -1679,6 +2451,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 global.allFeedItems[parentIndex].commentCount = 0;
                             }
                             global.allFeedItems[parentIndex].commentCount += 1;
+                            global.allFeedItems[parentIndex].updatedAt = new Date();
                             console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory only with count: ${global.allFeedItems[parentIndex].commentCount}`);
                         }
                     });
@@ -2058,9 +2831,72 @@ app.post('/feed', validateApiKey, (req, res) => {
 
         // Find the 'get' case in the switch statement of the /feed endpoint
         case 'get':
-            console.log("DEBUG-SYNC-SERVER: Handling 'get' feed request");
-            
-            // Try to get items from MongoDB first
+            // Delta sync support
+            const sinceTimestamp = req.body.sinceTimestamp;
+
+            if (sinceTimestamp) {
+                // DELTA SYNC: Return only items modified since the given timestamp
+                const sinceDate = new Date(sinceTimestamp);
+                console.log(`DEBUG-SYNC-SERVER: Delta sync request - items since ${sinceDate.toISOString()}`);
+
+                FeedItem.find({
+                    isDeleted: false,
+                    $or: [
+                        { updatedAt: { $gt: sinceDate } },
+                        { updatedAt: null, timestamp: { $gt: sinceDate } }
+                    ]
+                })
+                .select('-attributedContentData -imageData -videoData -audioData')
+                .then(items => {
+                    console.log(`DEBUG-SYNC-SERVER: Delta sync returning ${items.length} changed items (since ${sinceDate.toISOString()})`);
+
+                    const itemsForTransmission = items.map(item => {
+                        const itemObj = item.toObject();
+                        if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
+                            itemObj.encryptedData = itemObj.encryptedData.toString('base64');
+                        }
+                        return itemObj;
+                    });
+
+                    res.json({
+                        success: true,
+                        isDelta: true,
+                        sinceTimestamp: sinceTimestamp,
+                        serverTimestamp: new Date().toISOString(),
+                        feedItems: itemsForTransmission
+                    });
+                })
+                .catch(err => {
+                    console.error(`Delta sync error: ${err}`);
+                    // Fall back to full sync on error
+                    FeedItem.find({ isDeleted: false })
+                        .select('-attributedContentData -imageData -videoData -audioData')
+                        .then(allItems => {
+                            const itemsForTransmission = allItems.map(item => {
+                                const itemObj = item.toObject();
+                                if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
+                                    itemObj.encryptedData = itemObj.encryptedData.toString('base64');
+                                }
+                                return itemObj;
+                            });
+                            res.json({
+                                success: true,
+                                isDelta: false,
+                                serverTimestamp: new Date().toISOString(),
+                                feedItems: itemsForTransmission
+                            });
+                        })
+                        .catch(fallbackErr => {
+                            console.error(`Full sync fallback also failed: ${fallbackErr}`);
+                            res.json({ success: true, feedItems: [] });
+                        });
+                });
+                break;
+            }
+
+            console.log("DEBUG-SYNC-SERVER: Handling full 'get' feed request (no sinceTimestamp)");
+
+            // FULL SYNC (original behavior, backward compatible)
             // CRITICAL FIX: Exclude large binary fields to prevent OOM on Android
             FeedItem.find({ isDeleted: false })
                 .select('-attributedContentData -imageData -videoData -audioData')
@@ -2093,6 +2929,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // Return the transformed items
                     res.json({
                         success: true,
+                        isDelta: false,
+                        serverTimestamp: new Date().toISOString(),
                         feedItems: itemsForTransmission
                     });
                 })
@@ -2124,6 +2962,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                     
                     res.json({
                         success: true,
+                        isDelta: false,
+                        serverTimestamp: new Date().toISOString(),
                         feedItems: uniqueItems
                     });
                 });
@@ -2161,14 +3001,14 @@ app.post('/feed', validateApiKey, (req, res) => {
                     console.log(`DEBUG-THEBOOK: Updating item with chapterNumber=${feedItem.chapterNumber}`);
                 }
 
-                // ADDED: Preserve isLibraryDocument during updates
-                if (feedItem.isLibraryDocument !== undefined) {
-                    processedItem.isLibraryDocument = feedItem.isLibraryDocument;
+                // AI Question fields during updates
+                if (feedItem.isAIQuestion !== undefined) {
+                    processedItem.isAIQuestion = feedItem.isAIQuestion;
+                    console.log(`DEBUG-AIQUESTION: Updating item with isAIQuestion=${feedItem.isAIQuestion}`);
                 }
-
-                // ADDED: Preserve feedVisibilityOverride during updates
-                if (feedItem.feedVisibilityOverride !== undefined) {
-                    processedItem.feedVisibilityOverride = feedItem.feedVisibilityOverride;
+                if (feedItem.aiQuestionText !== undefined) {
+                    processedItem.aiQuestionText = feedItem.aiQuestionText;
+                    console.log(`DEBUG-AIQUESTION: Updating item with aiQuestionText`);
                 }
 
                 // CRITICAL: Explicitly preserve encryption fields during updates
@@ -2224,7 +3064,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.timestamp = new Date();
                     console.log(`Forcing new timestamp for edited item: ${processedItem.id}`);
                 }
-                
+
+                // Delta sync - update modification timestamp
+                processedItem.updatedAt = new Date();
+
                 // Update in MongoDB first
                 FeedItem.findOneAndUpdate(
                     { id: processedItem.id },
@@ -2407,7 +3250,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                 // Mark as deleted in MongoDB (soft delete)
                 FeedItem.findOneAndUpdate(
                     { id: feedItem.id },
-                    { isDeleted: true },
+                    { isDeleted: true, updatedAt: new Date() },
                     { new: true }
                 ).then(deletedItem => {
                     if (deletedItem) {
@@ -2861,37 +3704,40 @@ if (!global.signalKeys) {
     global.signalKeys = {};
 }
 
-// Upload Signal key bundle
+// v127: DEPRECATED - Duplicate endpoint removed. Primary endpoint at line 1590 uses MongoDB.
+// This in-memory version was overriding the MongoDB version. Commented out to fix.
+/*
 app.post('/signal/upload-keys', validateApiKey, (req, res) => {
     const { username, keyBundle } = req.body;
-    
+
     if (!username || !keyBundle) {
         return res.status(400).json({ error: 'Missing username or keyBundle' });
     }
-    
+
     // Validate key bundle structure
     if (!keyBundle.registrationId || !keyBundle.deviceId || !keyBundle.identityKey ||
         !keyBundle.signedPreKeyId || !keyBundle.signedPreKeyPublic || !keyBundle.signedPreKeySignature ||
         !keyBundle.preKeys || !Array.isArray(keyBundle.preKeys)) {
         return res.status(400).json({ error: 'Invalid key bundle structure' });
     }
-    
+
     // Store the key bundle
     global.signalKeys[username] = {
         ...keyBundle,
         uploadedAt: new Date().toISOString()
     };
-    
+
     console.log(`DEBUG-SIGNAL-SERVER: Uploaded key bundle for ${username}`);
     console.log(`DEBUG-SIGNAL-SERVER: Registration ID: ${keyBundle.registrationId}, Device ID: ${keyBundle.deviceId}`);
     console.log(`DEBUG-SIGNAL-SERVER: PreKeys count: ${keyBundle.preKeys.length}`);
-    
+
     res.json({
         success: true,
         message: 'Key bundle uploaded successfully',
         username: username
     });
 });
+*/
 
 // Download Signal key bundle for a user
 app.get('/signal/keys/:username', validateApiKey, (req, res) => {
@@ -3084,6 +3930,7 @@ app.post('/media/encrypted-image/upload', validateApiKey, (req, res) => {
             
             if (!global.mediaContent) {
                 global.mediaContent = {};
+if (!global.muxStreams) global.muxStreams = {};
             }
             
             global.mediaContent[imageId] = {
@@ -3276,7 +4123,9 @@ app.get('/downloadEncryptedImage/:imageId/:username', validateApiKey, async (req
         }
 
         // Get user's specific encrypted AES key
-        const userEncryptedKey = encryptedImage.encryptedKeysPerRecipient[username];
+        // v129: Case-insensitive lookup -- keys stored lowercase from encryption
+        const lowerUsername = username.toLowerCase();
+        const userEncryptedKey = encryptedImage.encryptedKeysPerRecipient[lowerUsername] || encryptedImage.encryptedKeysPerRecipient[username];
 
         if (!userEncryptedKey) {
             console.log(`DEBUG-HYBRID-IMAGE: ❌ No key found for user: ${username}`);
@@ -3310,6 +4159,363 @@ app.get('/downloadEncryptedImage/:imageId/:username', validateApiKey, async (req
             details: error.message
         });
     }
+});
+
+
+// =============================================================================
+// MUX VIDEO LIVE STREAMING ENDPOINTS (Phase 1 - Feb 2026)
+// =============================================================================
+
+// Create a new Mux live stream
+app.post('/video/create-live-stream', validateApiKey, async (req, res) => {
+    console.log('DEBUG-MUX: Create live stream request received');
+    
+    try {
+        if (!muxClient) {
+            console.log('DEBUG-MUX: Mux client not initialized');
+            return res.status(500).json({
+                success: false,
+                error: 'Mux video service not configured'
+            });
+        }
+        
+        const { title, author } = req.body;
+        console.log(`DEBUG-MUX: Creating stream for title="${title}", author="${author}"`);
+        
+        // Create live stream via Mux API
+        const liveStream = await muxClient.video.liveStreams.create({
+            playback_policy: ['public'],
+            new_asset_settings: {
+                playback_policy: ['public']
+            },
+            reduced_latency: true,
+            reconnect_window: 300,
+            test: false
+        });
+        
+        console.log(`DEBUG-MUX: Live stream created with ID: ${liveStream.id}`);
+        console.log(`DEBUG-MUX: Playback ID: ${liveStream.playback_ids[0].id}`);
+        console.log(`DEBUG-MUX: Stream Key: ${liveStream.stream_key}`);
+        
+        // Store stream info
+        const streamInfo = {
+            muxStreamId: liveStream.id,
+            muxPlaybackId: liveStream.playback_ids[0].id,
+            streamKey: liveStream.stream_key,
+            rtmpUrl: 'rtmps://global-live.mux.com:443/app',
+            status: liveStream.status,
+            createdAt: new Date(),
+            title: title,
+            author: author
+        };
+        
+        global.muxStreams[liveStream.id] = streamInfo;
+        
+        res.json({
+            success: true,
+            stream: streamInfo
+        });
+        
+    } catch (error) {
+        console.error(`DEBUG-MUX: Create stream failed: ${error.message}`);
+        console.error(error.stack);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to create live stream',
+            details: error.message
+        });
+    }
+});
+
+// Get live stream status
+app.get('/video/stream-status/:streamId', validateApiKey, async (req, res) => {
+    console.log(`DEBUG-MUX: Stream status request for ${req.params.streamId}`);
+    
+    try {
+        if (!muxClient) {
+            return res.status(500).json({
+                success: false,
+                error: 'Mux video service not configured'
+            });
+        }
+        
+        const liveStream = await muxClient.video.liveStreams.retrieve(req.params.streamId);
+        
+        res.json({
+            success: true,
+            status: liveStream.status,
+            streamId: liveStream.id,
+            playbackId: liveStream.playback_ids[0]?.id,
+            activeAssetId: liveStream.active_asset_id
+        });
+        
+    } catch (error) {
+        console.error(`DEBUG-MUX: Status check failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get stream status',
+            details: error.message
+        });
+    }
+});
+
+// Update live stream status on feed item (called by iOS app when going live / ending stream)
+app.patch('/video/update-stream-status', validateApiKey, async (req, res) => {
+    const { muxStreamId, status } = req.body;
+    console.log(`DEBUG-MUX: Update stream status request: ${muxStreamId} -> ${status}`);
+
+    if (!muxStreamId || !status) {
+        return res.status(400).json({
+            success: false,
+            error: 'Missing muxStreamId or status'
+        });
+    }
+
+    try {
+        const FeedItem = mongoose.model('FeedItem');
+        const result = await FeedItem.findOneAndUpdate(
+            { muxStreamId: muxStreamId },
+            { liveStreamStatus: status },
+            { new: true }
+        );
+
+        if (!result) {
+            console.log(`DEBUG-MUX: No feed item found with muxStreamId ${muxStreamId}`);
+            return res.status(404).json({
+                success: false,
+                error: 'No feed item found with that muxStreamId'
+            });
+        }
+
+        console.log(`DEBUG-MUX: Updated liveStreamStatus to ${status} for feed item ${result.feedItemID}`);
+        res.json({
+            success: true,
+            feedItemID: result.feedItemID,
+            muxStreamId: muxStreamId,
+            liveStreamStatus: status
+        });
+
+    } catch (error) {
+        console.error(`DEBUG-MUX: Update stream status failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to update stream status',
+            details: error.message
+        });
+    }
+});
+
+// List all active streams
+app.get('/video/streams', validateApiKey, async (req, res) => {
+    console.log('DEBUG-MUX: List streams request');
+    
+    try {
+        if (!muxClient) {
+            return res.status(500).json({
+                success: false,
+                error: 'Mux video service not configured'
+            });
+        }
+        
+        const streams = await muxClient.video.liveStreams.list();
+        
+        res.json({
+            success: true,
+            streams: streams.data.map(s => ({
+                id: s.id,
+                status: s.status,
+                playbackId: s.playback_ids[0]?.id,
+                createdAt: s.created_at
+            }))
+        });
+        
+    } catch (error) {
+        console.error(`DEBUG-MUX: List streams failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to list streams',
+            details: error.message
+        });
+    }
+});
+
+// End a live stream
+app.post('/video/stream/:streamId/complete', validateApiKey, async (req, res) => {
+    console.log(`DEBUG-MUX: Complete stream request for ${req.params.streamId}`);
+    
+    try {
+        if (!muxClient) {
+            return res.status(500).json({
+                success: false,
+                error: 'Mux video service not configured'
+            });
+        }
+        
+        await muxClient.video.liveStreams.complete(req.params.streamId);
+        
+        res.json({
+            success: true,
+            message: 'Stream completed'
+        });
+        
+    } catch (error) {
+        console.error(`DEBUG-MUX: Complete stream failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to complete stream',
+            details: error.message
+        });
+    }
+});
+
+// ============================================================
+// v130: INFLUENCER ANALYTICS ENDPOINTS
+// ============================================================
+
+// POST /analytics/plot-event
+// Anonymous, unauthenticated. Increments yesCount or noCount for orgId+questionNumber.
+// Privacy: no user identity stored. Aggregate only.
+app.post('/analytics/plot-event', analyticsRateLimit, async (req, res) => {
+   try {
+      const { orgId, questionNumber, questionText, section, state } = req.body;
+      if (!orgId || !questionNumber || !state) {
+         return res.status(400).json({ error: 'Missing required fields: orgId, questionNumber, state' });
+      }
+      if (state !== 'yes' && state !== 'no') {
+         return res.status(400).json({ error: 'state must be "yes" or "no"' });
+      }
+      const increment = state === 'yes' ? { yesCount: 1 } : { noCount: 1 };
+      await PlotAnalyticsSummary.findOneAndUpdate(
+         { orgId, questionNumber },
+         {
+            $inc: increment,
+            $set: {
+               questionText: questionText || '',
+               section: section || 0,
+               updatedAt: new Date()
+            },
+            $setOnInsert: { orgId, questionNumber }
+         },
+         { upsert: true, new: true }
+      );
+      console.log('DEBUG-ANALYTICS: Event recorded orgId=' + orgId + ' Q' + questionNumber + ' state=' + state);
+      res.json({ success: true });
+   } catch (error) {
+      console.error('DEBUG-ANALYTICS: Error recording event:', error.message);
+      res.status(500).json({ error: 'Internal server error' });
+   }
+});
+
+// GET /analytics/dashboard/:orgId
+// Authenticated (Bearer token). Returns aggregated stats for all questions with >= 25 responses.
+app.get('/analytics/dashboard/:orgId', validateApiKey, async (req, res) => {
+   try {
+      const { orgId } = req.params;
+      const MIN_THRESHOLD = 25;
+      const records = await PlotAnalyticsSummary.find({ orgId }).lean();
+      const results = records
+         .map(r => ({
+            questionNumber: r.questionNumber,
+            questionText: r.questionText,
+            section: r.section,
+            yesCount: r.yesCount || 0,
+            noCount: r.noCount || 0,
+            total: (r.yesCount || 0) + (r.noCount || 0),
+            yesPercent: (r.yesCount || 0) + (r.noCount || 0) > 0
+               ? Math.round(((r.yesCount || 0) / ((r.yesCount || 0) + (r.noCount || 0))) * 100)
+               : 0,
+            minimumThresholdMet: ((r.yesCount || 0) + (r.noCount || 0)) >= MIN_THRESHOLD
+         }))
+         .filter(r => r.minimumThresholdMet)
+         .sort((a, b) => b.yesPercent - a.yesPercent);
+      res.json({ orgId, totalQuestions: results.length, questions: results });
+   } catch (error) {
+      console.error('DEBUG-ANALYTICS: Error fetching dashboard:', error.message);
+      res.status(500).json({ error: 'Internal server error' });
+   }
+});
+
+// GET /analytics/dashboard-ui/:orgId
+// Unauthenticated HTML dashboard -- organization admin shares this URL with influencer.
+app.get('/analytics/dashboard-ui/:orgId', async (req, res) => {
+   const orgIdParam = req.params.orgId;
+   var DASHBOARD_HTML = '<!DOCTYPE html>\n'
+   + '<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+   + '<title>dWorld Community Intelligence</title>\n'
+   + '<style>\n'
+   + '* { box-sizing: border-box; margin: 0; padding: 0; }\n'
+   + 'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f1117; color: #e8eaf0; min-height: 100vh; }\n'
+   + 'header { background: linear-gradient(135deg, #1a1f2e 0%, #252b3b 100%); border-bottom: 1px solid #2d3548; padding: 24px 32px; }\n'
+   + 'header h1 { font-size: 22px; font-weight: 700; color: #fff; }\n'
+   + 'header p { font-size: 13px; color: #7c8499; margin-top: 4px; }\n'
+   + '.badge { display: inline-block; background: #1e4a9c; color: #6ca0f5; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; margin-left: 10px; vertical-align: middle; }\n'
+   + '.container { max-width: 960px; margin: 0 auto; padding: 32px 24px; }\n'
+   + '.section-header { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; color: #4a5168; text-transform: uppercase; margin: 32px 0 12px; border-bottom: 1px solid #1e2233; padding-bottom: 8px; }\n'
+   + '.card { background: #161b2a; border: 1px solid #222840; border-radius: 10px; padding: 18px 20px; margin-bottom: 10px; }\n'
+   + '.card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }\n'
+   + '.q-number { font-size: 11px; font-weight: 700; color: #4a5168; }\n'
+   + '.q-text { font-size: 14px; color: #c8cde0; margin-top: 2px; line-height: 1.4; }\n'
+   + '.pct { font-size: 24px; font-weight: 800; color: #4ade80; }\n'
+   + '.pct.low { color: #f87171; }\n'
+   + '.pct.mid { color: #fbbf24; }\n'
+   + '.bar-track { background: #1e2233; border-radius: 4px; height: 6px; margin-top: 10px; }\n'
+   + '.bar-fill { height: 6px; border-radius: 4px; background: linear-gradient(90deg, #1e4a9c, #4ade80); transition: width 0.6s ease; }\n'
+   + '.meta { font-size: 11px; color: #4a5168; margin-top: 8px; }\n'
+   + '.loading { text-align: center; padding: 80px; color: #4a5168; font-size: 14px; }\n'
+   + '.empty { text-align: center; padding: 80px; color: #4a5168; }\n'
+   + '.empty h2 { font-size: 18px; margin-bottom: 8px; color: #7c8499; }\n'
+   + '.summary-bar { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }\n'
+   + '.stat-pill { background: #161b2a; border: 1px solid #222840; border-radius: 8px; padding: 12px 18px; }\n'
+   + '.stat-pill .num { font-size: 22px; font-weight: 800; color: #fff; }\n'
+   + '.stat-pill .lbl { font-size: 11px; color: #4a5168; margin-top: 2px; }\n'
+   + '.refresh-btn { background: #1e3a6e; color: #6ca0f5; border: none; padding: 7px 16px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; float: right; }\n'
+   + '.refresh-btn:hover { background: #254d8a; }\n'
+   + '</style></head><body>\n'
+   + '<header><h1>dWorld Community Intelligence <span class="badge">PRIVATE</span></h1>\n'
+   + '<p>Organization: <strong id="orgLabel"></strong> -- What your community told the AI, privately</p></header>\n'
+   + '<div class="container"><button class="refresh-btn" onclick="loadData()">Refresh</button>\n'
+   + '<div id="app"><div class="loading">Loading community data...</div></div></div>\n'
+   + '<script>\n'
+   + 'var ORG_ID = ' + JSON.stringify(orgIdParam) + ';\n'
+   + 'document.getElementById("orgLabel").textContent = ORG_ID;\n'
+   + 'var SECTION_NAMES = {1:"Political Identity",2:"Voting",3:"Information Sources",4:"Civic Participation",5:"Democracy Skills",6:"Media Literacy",7:"Local Actions",8:"Key Issues",9:"Actions",20:"System / Meta",25:"2026 Mid-Term Elections",30:"Feed Commands"};\n'
+   + 'async function loadData() {\n'
+   + '  document.getElementById("app").innerHTML = \'<div class="loading">Loading...</div>\';\n'
+   + '  try {\n'
+   + '    var apiKey = "b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA";\n'
+   + '    var r = await fetch("/analytics/dashboard/" + ORG_ID, {headers:{"Authorization":"Bearer "+apiKey}});\n'
+   + '    if (!r.ok) throw new Error("HTTP " + r.status);\n'
+   + '    render(await r.json());\n'
+   + '  } catch(e) { document.getElementById("app").innerHTML = \'<div class="empty"><h2>Unable to load</h2><p>\'+e.message+\'</p></div>\'; }\n'
+   + '}\n'
+   + 'function render(data) {\n'
+   + '  if (!data.questions || data.questions.length === 0) {\n'
+   + '    document.getElementById("app").innerHTML = \'<div class="empty"><h2>No data yet</h2><p>Responses appear after 25+ users answer a question.</p></div>\';\n'
+   + '    return;\n'
+   + '  }\n'
+   + '  var bySection = {};\n'
+   + '  data.questions.forEach(function(q) { var s = q.section||0; if(!bySection[s])bySection[s]=[]; bySection[s].push(q); });\n'
+   + '  var totalR = data.questions.reduce(function(s,q){return s+q.total;},0);\n'
+   + '  var avgE = data.questions.length>0 ? Math.round(data.questions.reduce(function(s,q){return s+q.yesPercent;},0)/data.questions.length) : 0;\n'
+   + '  var h = \'<div class="summary-bar">\';\n'
+   + '  h += \'<div class="stat-pill"><div class="num">\'+data.totalQuestions+\'</div><div class="lbl">Topics Tracked</div></div>\';\n'
+   + '  h += \'<div class="stat-pill"><div class="num">\'+totalR.toLocaleString()+\'</div><div class="lbl">Total Responses</div></div>\';\n'
+   + '  h += \'<div class="stat-pill"><div class="num">\'+avgE+\'%</div><div class="lbl">Avg. Affirmative</div></div></div>\';\n'
+   + '  Object.keys(bySection).sort(function(a,b){return Number(a)-Number(b);}).forEach(function(sec) {\n'
+   + '    h += \'<div class="section-header">\'+(SECTION_NAMES[sec]||("Section "+sec))+\'</div>\';\n'
+   + '    bySection[sec].forEach(function(q) {\n'
+   + '      var pc = q.yesPercent>=60?"":q.yesPercent>=40?"mid":"low";\n'
+   + '      h += \'<div class="card"><div class="card-header"><div><div class="q-number">Q\'+q.questionNumber+\'</div><div class="q-text">\'+(q.questionText||"(no text)")+\'</div></div><div class="pct \'+pc+\'">\'+q.yesPercent+\'%</div></div>\';\n'
+   + '      h += \'<div class="bar-track"><div class="bar-fill" style="width:\'+q.yesPercent+\'%"></div></div>\';\n'
+   + '      h += \'<div class="meta">\'+q.yesCount+\' yes -- \'+q.noCount+\' no -- \'+q.total+\' total</div></div>\';\n'
+   + '    });\n'
+   + '  });\n'
+   + '  document.getElementById("app").innerHTML = h;\n'
+   + '}\n'
+   + 'loadData();\n'
+   + '</script></body></html>';
+   res.setHeader('Content-Type', 'text/html');
+   res.send(DASHBOARD_HTML);
 });
 
    app.listen(port, () => {

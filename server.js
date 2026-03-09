@@ -202,19 +202,6 @@ const encryptedImageSchema = new mongoose.Schema({
 
 const EncryptedImage = mongoose.model('EncryptedImage', encryptedImageSchema);
 
-// v130: Plot analytics schema -- aggregate counts per org+question, no raw events stored
-const plotAnalyticsSummarySchema = new mongoose.Schema({
-   orgId:          { type: String, required: true },
-   questionNumber: { type: String, required: true },
-   questionText:   { type: String, default: '' },
-   section:        { type: Number, default: 0 },
-   yesCount:       { type: Number, default: 0 },
-   noCount:        { type: Number, default: 0 },
-   updatedAt:      { type: Date, default: Date.now }
-});
-plotAnalyticsSummarySchema.index({ orgId: 1, questionNumber: 1 }, { unique: true });
-const PlotAnalyticsSummary = mongoose.model('PlotAnalyticsSummary', plotAnalyticsSummarySchema);
-
 // v127: Key change notification schema
 const keyChangeNotificationSchema = new mongoose.Schema({
    id: { type: String, required: true, unique: true, index: true },
@@ -250,6 +237,36 @@ keyChangeNotificationSchema.index({ senderUsername: 1, status: 1 });
 keyChangeNotificationSchema.index({ createdAt: 1 });
 
 const KeyChangeNotification = mongoose.model('KeyChangeNotification', keyChangeNotificationSchema);
+
+// v130: Plot Analytics Schema -- anonymous org-level aggregation (no userId, no PII)
+const plotAnalyticsSummarySchema = new mongoose.Schema({
+    orgId:          { type: String, required: true },
+    questionNumber: { type: String, required: true },
+    questionText:   { type: String, required: true },
+    section:        { type: Number, required: true },
+    yesCount:       { type: Number, default: 0 },
+    noCount:        { type: Number, default: 0 },
+    updatedAt:      { type: Date, default: Date.now }
+});
+plotAnalyticsSummarySchema.index({ orgId: 1, questionNumber: 1 }, { unique: true });
+const PlotAnalyticsSummary = mongoose.model('PlotAnalyticsSummary', plotAnalyticsSummarySchema);
+
+// v130: In-memory rate limiter for anonymous analytics endpoint (100 req/hr per IP)
+const analyticsRateLimit = new Map();
+function checkAnalyticsRateLimit(ip) {
+    const now = Date.now();
+    const windowMs = 60 * 60 * 1000; // 1 hour
+    const maxRequests = 100;
+    const entry = analyticsRateLimit.get(ip) || { count: 0, windowStart: now };
+    if (now - entry.windowStart > windowMs) {
+        analyticsRateLimit.set(ip, { count: 1, windowStart: now });
+        return true;
+    }
+    if (entry.count >= maxRequests) return false;
+    entry.count++;
+    analyticsRateLimit.set(ip, entry);
+    return true;
+}
 
 // v127: Calculate identity key fingerprint
 const crypto = require('crypto');
@@ -459,27 +476,6 @@ const validateApiKey = (req, res, next) => {
    
    next();
 };
-
-// v130: Simple in-memory rate limiter for anonymous analytics endpoint (100 req/hr per IP)
-const analyticsRateLimit = (() => {
-   const counts = new Map();
-   const WINDOW_MS = 60 * 60 * 1000;
-   const MAX_REQUESTS = 100;
-   return (req, res, next) => {
-      const ip = req.ip || req.connection.remoteAddress || 'unknown';
-      const now = Date.now();
-      const entry = counts.get(ip);
-      if (!entry || (now - entry.windowStart) > WINDOW_MS) {
-         counts.set(ip, { count: 1, windowStart: now });
-         return next();
-      }
-      if (entry.count >= MAX_REQUESTS) {
-         return res.status(429).json({ error: 'Rate limit exceeded' });
-      }
-      entry.count++;
-      return next();
-   };
-})();
 
 // Test endpoint to check the current state of feedItemIdCounter
 app.get('/debug/counter', validateApiKey, (req, res) => {
@@ -4125,7 +4121,8 @@ app.get('/downloadEncryptedImage/:imageId/:username', validateApiKey, async (req
         // Get user's specific encrypted AES key
         // v129: Case-insensitive lookup -- keys stored lowercase from encryption
         const lowerUsername = username.toLowerCase();
-        const userEncryptedKey = encryptedImage.encryptedKeysPerRecipient[lowerUsername] || encryptedImage.encryptedKeysPerRecipient[username];
+        const userEncryptedKey = Object.entries(encryptedImage.encryptedKeysPerRecipient)
+            .find(([k]) => k.toLowerCase() === lowerUsername)?.[1];
 
         if (!userEncryptedKey) {
             console.log(`DEBUG-HYBRID-IMAGE: ❌ No key found for user: ${username}`);
@@ -4368,154 +4365,116 @@ app.post('/video/stream/:streamId/complete', validateApiKey, async (req, res) =>
     }
 });
 
-// ============================================================
-// v130: INFLUENCER ANALYTICS ENDPOINTS
-// ============================================================
-
-// POST /analytics/plot-event
-// Anonymous, unauthenticated. Increments yesCount or noCount for orgId+questionNumber.
-// Privacy: no user identity stored. Aggregate only.
-app.post('/analytics/plot-event', analyticsRateLimit, async (req, res) => {
-   try {
-      const { orgId, questionNumber, questionText, section, state } = req.body;
-      if (!orgId || !questionNumber || !state) {
-         return res.status(400).json({ error: 'Missing required fields: orgId, questionNumber, state' });
-      }
-      if (state !== 'yes' && state !== 'no') {
-         return res.status(400).json({ error: 'state must be "yes" or "no"' });
-      }
-      const increment = state === 'yes' ? { yesCount: 1 } : { noCount: 1 };
-      await PlotAnalyticsSummary.findOneAndUpdate(
-         { orgId, questionNumber },
-         {
-            $inc: increment,
-            $set: {
-               questionText: questionText || '',
-               section: section || 0,
-               updatedAt: new Date()
+// v130: POST /analytics/plot-event -- anonymous, unauthenticated, rate-limited
+// Accepts: { orgId, questionNumber, questionText, section, state }
+// Increments yesCount or noCount in place. No userId stored.
+app.post('/analytics/plot-event', async (req, res) => {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    if (!checkAnalyticsRateLimit(ip)) {
+        return res.status(429).json({ error: 'Rate limit exceeded' });
+    }
+    const { orgId, questionNumber, questionText, section, state } = req.body || {};
+    if (!orgId || !questionNumber || !questionText || section == null || !state) {
+        return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (state !== 'yes' && state !== 'no') {
+        return res.status(400).json({ error: 'state must be yes or no' });
+    }
+    try {
+        const inc = state === 'yes' ? { yesCount: 1 } : { noCount: 1 };
+        await PlotAnalyticsSummary.findOneAndUpdate(
+            { orgId, questionNumber },
+            {
+                $inc: inc,
+                $set:  { updatedAt: new Date() },
+                $setOnInsert: { questionText, section }
             },
-            $setOnInsert: { orgId, questionNumber }
-         },
-         { upsert: true, new: true }
-      );
-      console.log('DEBUG-ANALYTICS: Event recorded orgId=' + orgId + ' Q' + questionNumber + ' state=' + state);
-      res.json({ success: true });
-   } catch (error) {
-      console.error('DEBUG-ANALYTICS: Error recording event:', error.message);
-      res.status(500).json({ error: 'Internal server error' });
-   }
+            { upsert: true, new: true }
+        );
+        res.json({ success: true });
+    } catch (err) {
+        console.error('DEBUG-ANALYTICS: plot-event error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-// GET /analytics/dashboard/:orgId
-// Authenticated (Bearer token). Returns aggregated stats for all questions with >= 25 responses.
+// v130: GET /analytics/dashboard/:orgId -- authenticated JSON data
+// Returns questions with >= 25 total responses, sorted by yesPercent desc
 app.get('/analytics/dashboard/:orgId', validateApiKey, async (req, res) => {
-   try {
-      const { orgId } = req.params;
-      const MIN_THRESHOLD = 25;
-      const records = await PlotAnalyticsSummary.find({ orgId }).lean();
-      const results = records
-         .map(r => ({
-            questionNumber: r.questionNumber,
-            questionText: r.questionText,
-            section: r.section,
-            yesCount: r.yesCount || 0,
-            noCount: r.noCount || 0,
-            total: (r.yesCount || 0) + (r.noCount || 0),
-            yesPercent: (r.yesCount || 0) + (r.noCount || 0) > 0
-               ? Math.round(((r.yesCount || 0) / ((r.yesCount || 0) + (r.noCount || 0))) * 100)
-               : 0,
-            minimumThresholdMet: ((r.yesCount || 0) + (r.noCount || 0)) >= MIN_THRESHOLD
-         }))
-         .filter(r => r.minimumThresholdMet)
-         .sort((a, b) => b.yesPercent - a.yesPercent);
-      res.json({ orgId, totalQuestions: results.length, questions: results });
-   } catch (error) {
-      console.error('DEBUG-ANALYTICS: Error fetching dashboard:', error.message);
-      res.status(500).json({ error: 'Internal server error' });
-   }
+    const { orgId } = req.params;
+    try {
+        const rows = await PlotAnalyticsSummary.find({ orgId }).lean();
+        const filtered = rows
+            .map(r => {
+                const total = r.yesCount + r.noCount;
+                return { ...r, total, yesPercent: total > 0 ? Math.round((r.yesCount / total) * 100) : 0 };
+            })
+            .filter(r => r.total >= 25)
+            .sort((a, b) => b.yesPercent - a.yesPercent);
+        res.json({ orgId, questions: filtered });
+    } catch (err) {
+        console.error('DEBUG-ANALYTICS: dashboard error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-// GET /analytics/dashboard-ui/:orgId
-// Unauthenticated HTML dashboard -- organization admin shares this URL with influencer.
+// v130: GET /analytics/dashboard-ui/:orgId -- unauthenticated HTML dashboard
 app.get('/analytics/dashboard-ui/:orgId', async (req, res) => {
-   const orgIdParam = req.params.orgId;
-   var DASHBOARD_HTML = '<!DOCTYPE html>\n'
-   + '<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
-   + '<title>dWorld Community Intelligence</title>\n'
-   + '<style>\n'
-   + '* { box-sizing: border-box; margin: 0; padding: 0; }\n'
-   + 'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f1117; color: #e8eaf0; min-height: 100vh; }\n'
-   + 'header { background: linear-gradient(135deg, #1a1f2e 0%, #252b3b 100%); border-bottom: 1px solid #2d3548; padding: 24px 32px; }\n'
-   + 'header h1 { font-size: 22px; font-weight: 700; color: #fff; }\n'
-   + 'header p { font-size: 13px; color: #7c8499; margin-top: 4px; }\n'
-   + '.badge { display: inline-block; background: #1e4a9c; color: #6ca0f5; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; margin-left: 10px; vertical-align: middle; }\n'
-   + '.container { max-width: 960px; margin: 0 auto; padding: 32px 24px; }\n'
-   + '.section-header { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; color: #4a5168; text-transform: uppercase; margin: 32px 0 12px; border-bottom: 1px solid #1e2233; padding-bottom: 8px; }\n'
-   + '.card { background: #161b2a; border: 1px solid #222840; border-radius: 10px; padding: 18px 20px; margin-bottom: 10px; }\n'
-   + '.card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }\n'
-   + '.q-number { font-size: 11px; font-weight: 700; color: #4a5168; }\n'
-   + '.q-text { font-size: 14px; color: #c8cde0; margin-top: 2px; line-height: 1.4; }\n'
-   + '.pct { font-size: 24px; font-weight: 800; color: #4ade80; }\n'
-   + '.pct.low { color: #f87171; }\n'
-   + '.pct.mid { color: #fbbf24; }\n'
-   + '.bar-track { background: #1e2233; border-radius: 4px; height: 6px; margin-top: 10px; }\n'
-   + '.bar-fill { height: 6px; border-radius: 4px; background: linear-gradient(90deg, #1e4a9c, #4ade80); transition: width 0.6s ease; }\n'
-   + '.meta { font-size: 11px; color: #4a5168; margin-top: 8px; }\n'
-   + '.loading { text-align: center; padding: 80px; color: #4a5168; font-size: 14px; }\n'
-   + '.empty { text-align: center; padding: 80px; color: #4a5168; }\n'
-   + '.empty h2 { font-size: 18px; margin-bottom: 8px; color: #7c8499; }\n'
-   + '.summary-bar { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }\n'
-   + '.stat-pill { background: #161b2a; border: 1px solid #222840; border-radius: 8px; padding: 12px 18px; }\n'
-   + '.stat-pill .num { font-size: 22px; font-weight: 800; color: #fff; }\n'
-   + '.stat-pill .lbl { font-size: 11px; color: #4a5168; margin-top: 2px; }\n'
-   + '.refresh-btn { background: #1e3a6e; color: #6ca0f5; border: none; padding: 7px 16px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; float: right; }\n'
-   + '.refresh-btn:hover { background: #254d8a; }\n'
-   + '</style></head><body>\n'
-   + '<header><h1>dWorld Community Intelligence <span class="badge">PRIVATE</span></h1>\n'
-   + '<p>Organization: <strong id="orgLabel"></strong> -- What your community told the AI, privately</p></header>\n'
-   + '<div class="container"><button class="refresh-btn" onclick="loadData()">Refresh</button>\n'
-   + '<div id="app"><div class="loading">Loading community data...</div></div></div>\n'
-   + '<script>\n'
-   + 'var ORG_ID = ' + JSON.stringify(orgIdParam) + ';\n'
-   + 'document.getElementById("orgLabel").textContent = ORG_ID;\n'
-   + 'var SECTION_NAMES = {1:"Political Identity",2:"Voting",3:"Information Sources",4:"Civic Participation",5:"Democracy Skills",6:"Media Literacy",7:"Local Actions",8:"Key Issues",9:"Actions",20:"System / Meta",25:"2026 Mid-Term Elections",30:"Feed Commands"};\n'
-   + 'async function loadData() {\n'
-   + '  document.getElementById("app").innerHTML = \'<div class="loading">Loading...</div>\';\n'
-   + '  try {\n'
-   + '    var apiKey = "b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA";\n'
-   + '    var r = await fetch("/analytics/dashboard/" + ORG_ID, {headers:{"Authorization":"Bearer "+apiKey}});\n'
-   + '    if (!r.ok) throw new Error("HTTP " + r.status);\n'
-   + '    render(await r.json());\n'
-   + '  } catch(e) { document.getElementById("app").innerHTML = \'<div class="empty"><h2>Unable to load</h2><p>\'+e.message+\'</p></div>\'; }\n'
-   + '}\n'
-   + 'function render(data) {\n'
-   + '  if (!data.questions || data.questions.length === 0) {\n'
-   + '    document.getElementById("app").innerHTML = \'<div class="empty"><h2>No data yet</h2><p>Responses appear after 25+ users answer a question.</p></div>\';\n'
-   + '    return;\n'
-   + '  }\n'
-   + '  var bySection = {};\n'
-   + '  data.questions.forEach(function(q) { var s = q.section||0; if(!bySection[s])bySection[s]=[]; bySection[s].push(q); });\n'
-   + '  var totalR = data.questions.reduce(function(s,q){return s+q.total;},0);\n'
-   + '  var avgE = data.questions.length>0 ? Math.round(data.questions.reduce(function(s,q){return s+q.yesPercent;},0)/data.questions.length) : 0;\n'
-   + '  var h = \'<div class="summary-bar">\';\n'
-   + '  h += \'<div class="stat-pill"><div class="num">\'+data.totalQuestions+\'</div><div class="lbl">Topics Tracked</div></div>\';\n'
-   + '  h += \'<div class="stat-pill"><div class="num">\'+totalR.toLocaleString()+\'</div><div class="lbl">Total Responses</div></div>\';\n'
-   + '  h += \'<div class="stat-pill"><div class="num">\'+avgE+\'%</div><div class="lbl">Avg. Affirmative</div></div></div>\';\n'
-   + '  Object.keys(bySection).sort(function(a,b){return Number(a)-Number(b);}).forEach(function(sec) {\n'
-   + '    h += \'<div class="section-header">\'+(SECTION_NAMES[sec]||("Section "+sec))+\'</div>\';\n'
-   + '    bySection[sec].forEach(function(q) {\n'
-   + '      var pc = q.yesPercent>=60?"":q.yesPercent>=40?"mid":"low";\n'
-   + '      h += \'<div class="card"><div class="card-header"><div><div class="q-number">Q\'+q.questionNumber+\'</div><div class="q-text">\'+(q.questionText||"(no text)")+\'</div></div><div class="pct \'+pc+\'">\'+q.yesPercent+\'%</div></div>\';\n'
-   + '      h += \'<div class="bar-track"><div class="bar-fill" style="width:\'+q.yesPercent+\'%"></div></div>\';\n'
-   + '      h += \'<div class="meta">\'+q.yesCount+\' yes -- \'+q.noCount+\' no -- \'+q.total+\' total</div></div>\';\n'
-   + '    });\n'
-   + '  });\n'
-   + '  document.getElementById("app").innerHTML = h;\n'
-   + '}\n'
-   + 'loadData();\n'
-   + '</script></body></html>';
-   res.setHeader('Content-Type', 'text/html');
-   res.send(DASHBOARD_HTML);
+    const { orgId } = req.params;
+    try {
+        const rows = await PlotAnalyticsSummary.find({ orgId }).lean();
+        const questions = rows
+            .map(r => {
+                const total = r.yesCount + r.noCount;
+                return { ...r, total, yesPercent: total > 0 ? Math.round((r.yesCount / total) * 100) : 0 };
+            })
+            .filter(r => r.total >= 25)
+            .sort((a, b) => b.yesPercent - a.yesPercent);
+
+        const totalResponses = questions.reduce((s, q) => s + q.total, 0);
+
+        const rows_html = questions.map(q => ''
+            + '<tr>'
+            + '<td style="padding:10px;color:#ccc">' + q.section + '</td>'
+            + '<td style="padding:10px;color:#fff">' + q.questionText + '</td>'
+            + '<td style="padding:10px;text-align:center">'
+            + '<div style="background:#333;border-radius:4px;height:20px;width:120px;display:inline-block;vertical-align:middle">'
+            + '<div style="background:#4CAF50;height:100%;width:' + q.yesPercent + '%;border-radius:4px"></div>'
+            + '</div>'
+            + '<span style="color:#4CAF50;margin-left:8px">' + q.yesPercent + '% yes</span>'
+            + '</td>'
+            + '<td style="padding:10px;color:#888;text-align:right">' + q.total + ' responses</td>'
+            + '</tr>').join('');
+
+        const html = '<!DOCTYPE html><html><head><title>' + orgId + ' -- dWorld Analytics</title>'
+            + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            + '<style>body{background:#1a1a2e;font-family:system-ui,sans-serif;color:#fff;margin:0;padding:20px}'
+            + 'h1{color:#4fc3f7}table{width:100%;border-collapse:collapse;margin-top:20px}'
+            + 'tr:nth-child(even){background:#12122a}tr:hover{background:#1e1e3a}'
+            + '.stat{display:inline-block;background:#12122a;border-radius:8px;padding:15px 25px;margin:10px;text-align:center}'
+            + '.stat-num{font-size:2em;color:#4fc3f7;font-weight:bold}.stat-label{color:#888;font-size:.9em}</style></head>'
+            + '<body>'
+            + '<h1>' + orgId + ' Community Dashboard</h1>'
+            + '<p style="color:#888">Anonymous aggregated responses - Minimum 25 per question</p>'
+            + '<div>'
+            + '<div class="stat"><div class="stat-num">' + questions.length + '</div><div class="stat-label">Questions tracked</div></div>'
+            + '<div class="stat"><div class="stat-num">' + totalResponses + '</div><div class="stat-label">Total responses</div></div>'
+            + '</div>'
+            + '<table><thead><tr>'
+            + '<th style="padding:10px;text-align:left;color:#4fc3f7;border-bottom:1px solid #333">Section</th>'
+            + '<th style="padding:10px;text-align:left;color:#4fc3f7;border-bottom:1px solid #333">Question</th>'
+            + '<th style="padding:10px;text-align:left;color:#4fc3f7;border-bottom:1px solid #333">Yes %</th>'
+            + '<th style="padding:10px;text-align:right;color:#4fc3f7;border-bottom:1px solid #333">Responses</th>'
+            + '</tr></thead><tbody>'
+            + (rows_html || '<tr><td colspan="4" style="padding:20px;text-align:center;color:#888">No questions have reached 25 responses yet.</td></tr>')
+            + '</tbody></table>'
+            + '<p style="color:#444;margin-top:30px;font-size:.8em">Updated live - ' + new Date().toUTCString() + '</p>'
+            + '</body></html>';
+        res.type('html').send(html);
+    } catch (err) {
+        console.error('DEBUG-ANALYTICS: dashboard-ui error:', err.message);
+        res.status(500).send('<h1>Error loading dashboard</h1>');
+    }
 });
 
    app.listen(port, () => {
