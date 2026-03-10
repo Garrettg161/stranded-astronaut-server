@@ -4399,7 +4399,7 @@ app.post('/analytics/plot-event', async (req, res) => {
 });
 
 // v130: GET /analytics/dashboard/:orgId -- authenticated JSON data
-// Returns questions with > 0 total responses, sorted by yesPercent desc
+// Returns questions with >= 25 total responses, sorted by yesPercent desc
 app.get('/analytics/dashboard/:orgId', validateApiKey, async (req, res) => {
     const { orgId } = req.params;
     try {
@@ -4409,7 +4409,7 @@ app.get('/analytics/dashboard/:orgId', validateApiKey, async (req, res) => {
                 const total = r.yesCount + r.noCount;
                 return { ...r, total, yesPercent: total > 0 ? Math.round((r.yesCount / total) * 100) : 0 };
             })
-            .filter(r => r.total > 0)
+            .filter(r => r.total >= 25)
             .sort((a, b) => b.yesPercent - a.yesPercent);
         res.json({ orgId, questions: filtered });
     } catch (err) {
@@ -4428,7 +4428,7 @@ app.get('/analytics/dashboard-ui/:orgId', async (req, res) => {
                 const total = r.yesCount + r.noCount;
                 return { ...r, total, yesPercent: total > 0 ? Math.round((r.yesCount / total) * 100) : 0 };
             })
-            .filter(r => r.total > 0)
+            .filter(r => r.total >= 25)
             .sort((a, b) => b.yesPercent - a.yesPercent);
 
         const totalResponses = questions.reduce((s, q) => s + q.total, 0);
@@ -4455,7 +4455,7 @@ app.get('/analytics/dashboard-ui/:orgId', async (req, res) => {
             + '.stat-num{font-size:2em;color:#4fc3f7;font-weight:bold}.stat-label{color:#888;font-size:.9em}</style></head>'
             + '<body>'
             + '<h1>' + orgId + ' Community Dashboard</h1>'
-            + '<p style="color:#888">Anonymous aggregated responses</p>'
+            + '<p style="color:#888">Anonymous aggregated responses - Minimum 25 per question</p>'
             + '<div>'
             + '<div class="stat"><div class="stat-num">' + questions.length + '</div><div class="stat-label">Questions tracked</div></div>'
             + '<div class="stat"><div class="stat-num">' + totalResponses + '</div><div class="stat-label">Total responses</div></div>'
@@ -4466,7 +4466,7 @@ app.get('/analytics/dashboard-ui/:orgId', async (req, res) => {
             + '<th style="padding:10px;text-align:left;color:#4fc3f7;border-bottom:1px solid #333">Yes %</th>'
             + '<th style="padding:10px;text-align:right;color:#4fc3f7;border-bottom:1px solid #333">Responses</th>'
             + '</tr></thead><tbody>'
-            + (rows_html || '<tr><td colspan="4" style="padding:20px;text-align:center;color:#888">No responses recorded yet.</td></tr>')
+            + (rows_html || '<tr><td colspan="4" style="padding:20px;text-align:center;color:#888">No questions have reached 25 responses yet.</td></tr>')
             + '</tbody></table>'
             + '<p style="color:#444;margin-top:30px;font-size:.8em">Updated live - ' + new Date().toUTCString() + '</p>'
             + '</body></html>';
