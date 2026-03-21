@@ -1,8 +1,4 @@
-// Stranded Astronaut Server version 131
-// v131: Mux live captions + VOD recording playback
-//   - Added generated_subtitles to create-live-stream (English auto-captions via Mux AI)
-//   - Enhanced stream-status to return recentAssetIds for VOD recording lookup
-//   - New endpoint: /video/asset-playback/:assetId -- returns VOD playback URL for completed broadcasts
+// Stranded Astronaut Server version 130
 // v130: Influencer Analytics Dashboard
 //   - PlotAnalyticsSummary MongoDB schema (org-level aggregated plot question stats)
 //   - POST /analytics/plot-event -- anonymous, unauthenticated, rate-limited per IP (100/hr)
@@ -4184,8 +4180,6 @@ app.post('/video/create-live-stream', validateApiKey, async (req, res) => {
         console.log(`DEBUG-MUX: Creating stream for title="${title}", author="${author}"`);
         
         // Create live stream via Mux API
-        // v131: Auto-generated English closed captions (Mux AI speech-to-text)
-        // Captions are embedded in HLS manifest -- AVPlayer/ExoPlayer render automatically
         const liveStream = await muxClient.video.liveStreams.create({
             playback_policy: ['public'],
             new_asset_settings: {
@@ -4193,11 +4187,7 @@ app.post('/video/create-live-stream', validateApiKey, async (req, res) => {
             },
             reduced_latency: true,
             reconnect_window: 300,
-            test: false,
-            generated_subtitles: [{
-                name: "English CC (auto)",
-                language_code: "en"
-            }]
+            test: false
         });
         
         console.log(`DEBUG-MUX: Live stream created with ID: ${liveStream.id}`);
@@ -4248,14 +4238,12 @@ app.get('/video/stream-status/:streamId', validateApiKey, async (req, res) => {
         
         const liveStream = await muxClient.video.liveStreams.retrieve(req.params.streamId);
         
-        // v131: Include recent_asset_ids for VOD recording playback
         res.json({
             success: true,
             status: liveStream.status,
             streamId: liveStream.id,
             playbackId: liveStream.playback_ids[0]?.id,
-            activeAssetId: liveStream.active_asset_id,
-            recentAssetIds: liveStream.recent_asset_ids || []
+            activeAssetId: liveStream.active_asset_id
         });
         
     } catch (error) {
@@ -4263,48 +4251,6 @@ app.get('/video/stream-status/:streamId', validateApiKey, async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to get stream status',
-            details: error.message
-        });
-    }
-});
-
-// v131: Get VOD asset playback URL (for watching recordings of completed broadcasts)
-app.get('/video/asset-playback/:assetId', validateApiKey, async (req, res) => {
-    console.log(`DEBUG-MUX: Asset playback request for ${req.params.assetId}`);
-    
-    try {
-        if (!muxClient) {
-            return res.status(500).json({
-                success: false,
-                error: 'Mux video service not configured'
-            });
-        }
-        
-        const asset = await muxClient.video.assets.retrieve(req.params.assetId);
-        
-        const playbackId = asset.playback_ids?.[0]?.id;
-        if (!playbackId) {
-            return res.status(404).json({
-                success: false,
-                error: 'No playback ID found for this asset'
-            });
-        }
-        
-        res.json({
-            success: true,
-            assetId: asset.id,
-            playbackId: playbackId,
-            playbackUrl: `https://stream.mux.com/${playbackId}.m3u8`,
-            thumbnailUrl: `https://image.mux.com/${playbackId}/thumbnail.jpg`,
-            status: asset.status,
-            duration: asset.duration
-        });
-        
-    } catch (error) {
-        console.error(`DEBUG-MUX: Asset playback lookup failed: ${error.message}`);
-        res.status(500).json({
-            success: false,
-            error: 'Failed to get asset playback info',
             details: error.message
         });
     }
