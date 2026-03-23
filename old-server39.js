@@ -153,17 +153,6 @@ const feedItemSchema = new mongoose.Schema({
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
 
-// v4.6: FeedItem history schema for audit trail -- prevents data loss from ID collisions
-const feedItemHistorySchema = new mongoose.Schema({
-   feedItemId: { type: String, required: true, index: true },
-   operation: { type: String, required: true },
-   previousDocument: mongoose.Schema.Types.Mixed,
-   changedBy: String,
-   changedAt: { type: Date, default: Date.now },
-   reason: String
-});
-const FeedItemHistory = mongoose.model('FeedItemHistory', feedItemHistorySchema);
-
 // Signal Protocol key bundle schema
 const signalKeyBundleSchema = new mongoose.Schema({
    username: { type: String, required: true, unique: true, index: true },
@@ -2468,28 +2457,13 @@ app.post('/feed', validateApiKey, (req, res) => {
                     });
                 }
                 
-                // v4.6: Check for ID collision before saving -- archive existing item if found
-                FeedItem.findOne({ id: processedItem.id }).then(existingItem => {
-                    if (existingItem) {
-                        console.log(`WARNING-COLLISION: Item ${processedItem.id} already exists! Archiving previous version. Old title: "${existingItem.title}", New title: "${processedItem.title}"`);
-                        return new FeedItemHistory({
-                            feedItemId: existingItem.id,
-                            operation: 'overwrite',
-                            previousDocument: existingItem.toObject(),
-                            changedBy: processedItem.author || 'unknown',
-                            reason: 'Publish collision -- new item had same UUID as existing item'
-                        }).save();
-                    }
-                }).catch(err => {
-                    console.error(`WARNING-COLLISION: History archive failed: ${err.message}`);
-                }).finally(() => {
-                    // Save to MongoDB and propagate to memory
-                    FeedItem.findOneAndUpdate(
-                        { id: processedItem.id },
-                        processedItem,
-                        { upsert: true, new: true }
-                    ).then(savedItem => {
-                        console.log(`Item saved to MongoDB: ${savedItem.id} with feedItemID: ${savedItem.feedItemID}`);
+                // Save to MongoDB and propagate to memory
+                FeedItem.findOneAndUpdate(
+                    { id: processedItem.id },
+                    processedItem,
+                    { upsert: true, new: true }
+                ).then(savedItem => {
+                    console.log(`Item saved to MongoDB: ${savedItem.id} with feedItemID: ${savedItem.feedItemID}`);
                     
                     // Add to global feed items if not already there
                     const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
@@ -2596,7 +2570,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                         feedItemID: processedItem.feedItemID // Include the numeric ID in response
                     });
                 });
-                }); // v4.6: closes .finally() from collision check
             } else {
                 res.status(400).json({ error: 'Missing feed item data' });
             }
@@ -2647,28 +2620,13 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.content = '[Encrypted Message]';
                 }
                 
-                // v4.6: Check for ID collision before DM save
-                FeedItem.findOne({ id: processedItem.id }).then(existingDM => {
-                    if (existingDM) {
-                        console.log(`WARNING-COLLISION: DM item ${processedItem.id} already exists! Archiving.`);
-                        return new FeedItemHistory({
-                            feedItemId: existingDM.id,
-                            operation: 'overwrite',
-                            previousDocument: existingDM.toObject(),
-                            changedBy: processedItem.author || 'unknown',
-                            reason: 'DM publish collision'
-                        }).save();
-                    }
-                }).catch(err => {
-                    console.error(`WARNING-COLLISION: DM history archive failed: ${err.message}`);
-                }).finally(() => {
-                    // Save to MongoDB
-                    FeedItem.findOneAndUpdate(
-                        { id: processedItem.id },
-                        processedItem,
-                        { upsert: true, new: true }
-                    ).then(savedItem => {
-                        console.log(`DEBUG-DM-MULTI-SERVER: Multi-recipient message saved: ${savedItem.id}`);
+                // Save to MongoDB
+                FeedItem.findOneAndUpdate(
+                    { id: processedItem.id },
+                    processedItem,
+                    { upsert: true, new: true }
+                ).then(savedItem => {
+                    console.log(`DEBUG-DM-MULTI-SERVER: âœ… Multi-recipient message saved: ${savedItem.id}`);
                     
                     // Add to global feed
                     const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
@@ -2696,12 +2654,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                     console.error(`DEBUG-DM-MULTI-SERVER: Error saving: ${err}`);
                     res.status(500).json({ error: 'Database error' });
                 });
-                }); // v4.6: closes .finally() from DM collision check
             } else {
                 res.status(400).json({ error: 'Missing feed item data' });
             }
             break;
-
+                    
         case 'getComments':
             // Get comments for a specific feed item
             if (feedItemId) {
