@@ -2383,12 +2383,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // Delta sync - set updatedAt to server time on publish
                     processedItem.updatedAt = new Date();
 
-                    // v4.7: VOTE PRESERVATION -- never let publish/update overwrite vote counts.
-                    // Vote counts are managed exclusively by the updateVoteCount action.
-                    // Clients may have stale local counts that would destroy server tallies.
-                    delete processedItem.approvalCount;
-                    delete processedItem.disapprovalCount;
-
                     // ADD THIS: Preserve isRepost property
                     if (feedItem.isRepost) {
                         processedItem.isRepost = true;
@@ -2488,23 +2482,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     }
                 }).catch(err => {
                     console.error(`WARNING-COLLISION: History archive failed: ${err.message}`);
-                }).finally(async () => {
-                    // v4.7: Before saving, preserve existing vote counts from database
-                    try {
-                        const existingForVotes = await FeedItem.findOne({ id: processedItem.id });
-                        if (existingForVotes) {
-                            processedItem.approvalCount = existingForVotes.approvalCount || 0;
-                            processedItem.disapprovalCount = existingForVotes.disapprovalCount || 0;
-                        } else {
-                            processedItem.approvalCount = 0;
-                            processedItem.disapprovalCount = 0;
-                        }
-                    } catch (voteErr) {
-                        console.error(`Vote preservation lookup failed: ${voteErr.message}`);
-                        processedItem.approvalCount = 0;
-                        processedItem.disapprovalCount = 0;
-                    }
-
+                }).finally(() => {
                     // Save to MongoDB and propagate to memory
                     FeedItem.findOneAndUpdate(
                         { id: processedItem.id },
@@ -3133,26 +3111,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                 // Delta sync - update modification timestamp
                 processedItem.updatedAt = new Date();
 
-                // v4.7: VOTE PRESERVATION -- strip client vote counts, preserve server values
-                delete processedItem.approvalCount;
-                delete processedItem.disapprovalCount;
-
-                // v4.7: Read existing vote counts before update
-                FeedItem.findOne({ id: processedItem.id }).then(existingForVotes => {
-                    if (existingForVotes) {
-                        processedItem.approvalCount = existingForVotes.approvalCount || 0;
-                        processedItem.disapprovalCount = existingForVotes.disapprovalCount || 0;
-                    } else {
-                        processedItem.approvalCount = 0;
-                        processedItem.disapprovalCount = 0;
-                    }
-                }).catch(err => {
-                    console.error(`Vote preservation lookup failed: ${err.message}`);
-                    processedItem.approvalCount = 0;
-                    processedItem.disapprovalCount = 0;
-                }).finally(() => {
-
-                // Update in MongoDB
+                // Update in MongoDB first
                 FeedItem.findOneAndUpdate(
                     { id: processedItem.id },
                     processedItem,
@@ -3160,7 +3119,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                 ).then(updatedItem => {
                     if (updatedItem) {
                         console.log(`Item updated in MongoDB: ${updatedItem.id}`);
-
+                        
                         // Find and update in global array
                         const globalIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
                         if (globalIndex !== -1) {
@@ -3168,7 +3127,13 @@ app.post('/feed', validateApiKey, (req, res) => {
                             if (!processedItem.commentCount && global.allFeedItems[globalIndex].commentCount) {
                                 processedItem.commentCount = global.allFeedItems[globalIndex].commentCount;
                             }
-                            // v4.7: vote counts already preserved from DB above
+                            // Preserve vote counts from client update
+                            if (feedItem.approvalCount !== undefined) {
+                                processedItem.approvalCount = feedItem.approvalCount;
+                            }
+                            if (feedItem.disapprovalCount !== undefined) {
+                                processedItem.disapprovalCount = feedItem.disapprovalCount;
+                            }
                             // Update the item in the global pool
                             global.allFeedItems[globalIndex] = processedItem;
                             console.log(`Updated item in global feed items pool`);
@@ -3193,8 +3158,14 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 if (!processedItem.commentCount && session.feedItems[sessionIndex].commentCount) {
                                     processedItem.commentCount = session.feedItems[sessionIndex].commentCount;
                                 }
-                                // v4.7: vote counts already preserved from DB above
-
+                                // Preserve vote counts from client update
+                                if (feedItem.approvalCount !== undefined) {
+                                    processedItem.approvalCount = feedItem.approvalCount;
+                                }
+                                if (feedItem.disapprovalCount !== undefined) {
+                                    processedItem.disapprovalCount = feedItem.disapprovalCount;
+                                }
+                                
                                 // Update the item
                                 session.feedItems[sessionIndex] = processedItem;
                                 console.log(`Updated item in session ${sessId}`);
@@ -3271,7 +3242,14 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // Find and update in global array
                     const globalIndex = global.allFeedItems.findIndex(item => item.id === processedItem.id);
                     if (globalIndex !== -1) {
-                        // v4.7: vote counts already preserved from DB above
+                        // Preserve vote counts from client update
+                        if (feedItem.approvalCount !== undefined) {
+                            processedItem.approvalCount = feedItem.approvalCount;
+                        }
+                        if (feedItem.disapprovalCount !== undefined) {
+                            processedItem.disapprovalCount = feedItem.disapprovalCount;
+                        }
+                        
                         global.allFeedItems[globalIndex] = processedItem;
                         console.log(`Updated item in global feed items pool (DB fallback)`);
                     } else {
@@ -3283,19 +3261,25 @@ app.post('/feed', validateApiKey, (req, res) => {
                     Object.keys(gameSessions).forEach(sessId => {
                         const session = gameSessions[sessId];
                         if (!session.feedItems) session.feedItems = [];
-
+                        
                         const sessionIndex = session.feedItems.findIndex(item => item.id === processedItem.id);
                         if (sessionIndex !== -1) {
-                            // v4.7: vote counts already preserved from DB above
+                            // Preserve vote counts from client update
+                            if (feedItem.approvalCount !== undefined) {
+                                processedItem.approvalCount = feedItem.approvalCount;
+                            }
+                            if (feedItem.disapprovalCount !== undefined) {
+                                processedItem.disapprovalCount = feedItem.disapprovalCount;
+                            }
+                            
                             session.feedItems[sessionIndex] = processedItem;
                         } else {
                             session.feedItems.push(processedItem);
                         }
                     });
-
+                    
                     res.json({ success: true, feedItemId: processedItem.id });
                 });
-                }); // v4.7: closes .finally() from vote preservation lookup
             } else {
                 res.status(400).json({ error: 'Missing feed item data or ID' });
             }
