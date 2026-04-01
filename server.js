@@ -1,4 +1,5 @@
-// Stranded Astronaut Server version 132 -- v193: Author guard on publish (reject overwrites by non-authors)
+// Stranded Astronaut Server version 133 -- Author guard + pre-update archive on UPDATE case (mirrors publish protection)
+// v132: Author guard on publish (reject overwrites by non-authors)
 // v131: Mux live captions + VOD recording playback
 //   - Added generated_subtitles to create-live-stream (English auto-captions via Mux AI)
 //   - Enhanced stream-status to return recentAssetIds for VOD recording lookup
@@ -3029,7 +3030,35 @@ app.post('/feed', validateApiKey, (req, res) => {
             // This handles updating an existing feed item (edit functionality)
             if (feedItem && feedItem.id) {
                 console.log(`Updating feed item: ${feedItem.title} [${feedItem.id}]`);
-                
+
+                // v133: Pre-update archive -- fire-and-forget snapshot into FeedItemHistory before any overwrite.
+                // Uses the same FeedItemHistory schema and pattern as the publish collision archive.
+                FeedItem.findOne({ id: feedItem.id, isDeleted: false }).then(storedForUpdate => {
+                    if (!storedForUpdate) return;
+                    new FeedItemHistory({
+                        feedItemId: storedForUpdate.id,
+                        operation: 'pre-update-snapshot',
+                        previousDocument: storedForUpdate.toObject ? storedForUpdate.toObject() : storedForUpdate,
+                        changedBy: feedItem.author || 'unknown',
+                        reason: 'v133 pre-update snapshot before overwrite'
+                    }).save()
+                    .then(() => console.log(`DEBUG-UPDATE-HISTORY: Archived "${storedForUpdate.title}" [${storedForUpdate.id}] before update`))
+                    .catch(e => console.error(`DEBUG-UPDATE-HISTORY: Archive failed (non-fatal): ${e.message}`));
+                }).catch(e => console.error(`DEBUG-UPDATE-GUARD: Lookup error: ${e.message}`));
+
+                // v133: Author guard -- uses global.allFeedItems (in-memory, always current)
+                // to avoid async restructure of this handler. Rejects if stored author differs
+                // from the author field in the incoming update request.
+                const guardItemUpdate = global.allFeedItems.find(i => i.id === feedItem.id);
+                if (guardItemUpdate &&
+                    guardItemUpdate.author &&
+                    feedItem.author &&
+                    guardItemUpdate.author.toLowerCase() !== feedItem.author.toLowerCase()) {
+                    console.log(`SECURITY-UPDATE: Rejected update of "${guardItemUpdate.title}" [${guardItemUpdate.id}] by "${feedItem.author}" -- owner is "${guardItemUpdate.author}"`);
+                    res.status(403).json({ error: 'Not authorized to update this item' });
+                    break;
+                }
+
                 // Process media content if present
                 let processedItem = processMediaContent(feedItem);
                 
