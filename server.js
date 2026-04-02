@@ -111,6 +111,10 @@ const feedItemSchema = new mongoose.Schema({
    aiQuestionText: String,  // Pre-written question text for AI injection
    isDatabaseItem: { type: Boolean, default: false },  // Database FeedItem flag
    databaseType: String,  // "poll", "petition", "pledge", "rsvp", etc.
+   isFundraising: { type: Boolean, default: false },   // Fundraising FeedItem flag
+   actBlueUrl: String,          // ActBlue campaign URL
+   fundraisingGoal: Number,     // Optional dollar target
+   fundraisingDescription: String,  // Why contribute body text
    metadata: mongoose.Schema.Types.Mixed,
    eventDescription: String,
    eventStartDate: Date,
@@ -3175,6 +3179,21 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItem.databaseType !== undefined) {
                     processedItem.databaseType = feedItem.databaseType;
                     console.log(`DEBUG-DBITEM: Updating item with databaseType=${feedItem.databaseType}`);
+                }
+
+                // Fundraising fields during updates
+                if (feedItem.isFundraising !== undefined) {
+                    processedItem.isFundraising = feedItem.isFundraising;
+                    console.log(`DEBUG-FUNDRAISE: Updating item with isFundraising=${feedItem.isFundraising}`);
+                }
+                if (feedItem.actBlueUrl !== undefined) {
+                    processedItem.actBlueUrl = feedItem.actBlueUrl;
+                }
+                if (feedItem.fundraisingGoal !== undefined) {
+                    processedItem.fundraisingGoal = feedItem.fundraisingGoal;
+                }
+                if (feedItem.fundraisingDescription !== undefined) {
+                    processedItem.fundraisingDescription = feedItem.fundraisingDescription;
                 }
 
                 // CRITICAL: Explicitly preserve encryption fields during updates
