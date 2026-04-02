@@ -109,6 +109,8 @@ const feedItemSchema = new mongoose.Schema({
    chapterNumber: String,  // Chapter numbering for TheBook (e.g., "1.1", "2.3")
    isAIQuestion: { type: Boolean, default: false },  // AI Question feed item flag
    aiQuestionText: String,  // Pre-written question text for AI injection
+   isDatabaseItem: { type: Boolean, default: false },  // Database FeedItem flag
+   databaseType: String,  // "poll", "petition", "pledge", "rsvp", etc.
    metadata: mongoose.Schema.Types.Mixed,
    eventDescription: String,
    eventStartDate: Date,
@@ -2841,6 +2843,75 @@ app.post('/feed', validateApiKey, (req, res) => {
             }
             break;
             
+        case 'databaseInteract':
+            // Atomic update of databaseData for any database FeedItem type.
+            if (feedItemId && req.body.databaseType && req.body.interaction) {
+                const dbType = req.body.databaseType;
+                const userId = req.body.userId || 'anonymous';
+                const interaction = req.body.interaction;
+
+                console.log(`DEBUG-DBITEM-SERVER: databaseInteract type=${dbType} item=${feedItemId} user=${userId}`);
+
+                const findQuery = {
+                    $or: [
+                        { id: String(feedItemId) },
+                        { feedItemID: String(feedItemId) }
+                    ]
+                };
+
+                FeedItem.findOne(findQuery).then(existingItem => {
+                    if (!existingItem) {
+                        return res.status(404).json({ error: 'Item not found' });
+                    }
+
+                    let meta = existingItem.metadata || {};
+                    let databaseData = meta.databaseData || {};
+
+                    if (dbType === 'poll') {
+                        const optionIndex = interaction.optionIndex;
+                        if (typeof optionIndex !== 'number') {
+                            return res.status(400).json({ error: 'poll requires optionIndex' });
+                        }
+                        let voteCounts = databaseData.voteCounts || [];
+                        const schema = meta.databaseSchema || {};
+                        const numOptions = (schema.options || []).length;
+                        while (voteCounts.length < numOptions) voteCounts.push(0);
+                        if (optionIndex < 0 || optionIndex >= numOptions) {
+                            return res.status(400).json({ error: 'optionIndex out of range' });
+                        }
+                        voteCounts[optionIndex] = (voteCounts[optionIndex] || 0) + 1;
+                        databaseData.voteCounts = voteCounts;
+                        databaseData.totalVotes = voteCounts.reduce((a, b) => a + b, 0);
+                        console.log(`DEBUG-DBITEM-SERVER: Poll vote recorded option=${optionIndex} totals=${JSON.stringify(voteCounts)}`);
+                    } else {
+                        console.log(`DEBUG-DBITEM-SERVER: Unknown databaseType '${dbType}' -- storing raw interaction`);
+                        databaseData.lastInteraction = { userId, interaction, timestamp: new Date() };
+                    }
+
+                    meta.databaseData = databaseData;
+                    existingItem.metadata = meta;
+                    existingItem.markModified('metadata');
+                    existingItem.updatedAt = new Date();
+
+                    return existingItem.save().then(saved => {
+                        const globalIndex = global.allFeedItems.findIndex(item =>
+                            String(item.id) === String(feedItemId)
+                        );
+                        if (globalIndex !== -1) {
+                            global.allFeedItems[globalIndex].metadata = meta;
+                        }
+                        console.log(`DEBUG-DBITEM-SERVER: databaseData saved to MongoDB`);
+                        res.json({ success: true, databaseData });
+                    });
+                }).catch(err => {
+                    console.error(`DEBUG-DBITEM-SERVER: Error: ${err}`);
+                    res.status(500).json({ error: 'Database error' });
+                });
+            } else {
+                res.status(400).json({ error: 'Missing feedItemId, databaseType, or interaction' });
+            }
+            break;
+
         case 'updateVoteCount':
             if (feedItemId && feedItem) {
                 console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvals: ${feedItem.approvalCount}, disapprovals: ${feedItem.disapprovalCount}`);
@@ -3094,6 +3165,16 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItem.aiQuestionText !== undefined) {
                     processedItem.aiQuestionText = feedItem.aiQuestionText;
                     console.log(`DEBUG-AIQUESTION: Updating item with aiQuestionText`);
+                }
+
+                // Database FeedItem fields during updates
+                if (feedItem.isDatabaseItem !== undefined) {
+                    processedItem.isDatabaseItem = feedItem.isDatabaseItem;
+                    console.log(`DEBUG-DBITEM: Updating item with isDatabaseItem=${feedItem.isDatabaseItem}`);
+                }
+                if (feedItem.databaseType !== undefined) {
+                    processedItem.databaseType = feedItem.databaseType;
+                    console.log(`DEBUG-DBITEM: Updating item with databaseType=${feedItem.databaseType}`);
                 }
 
                 // CRITICAL: Explicitly preserve encryption fields during updates
