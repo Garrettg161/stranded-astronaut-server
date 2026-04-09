@@ -1,4 +1,3 @@
-// Stranded Astronaut Server version 134 -- Fix: remove FEED_ITEM broadcast message from session.messages on delete
 // Stranded Astronaut Server version 133 -- Author guard + pre-update archive on UPDATE case (mirrors publish protection)
 // v132: Author guard on publish (reject overwrites by non-authors)
 // v131: Mux live captions + VOD recording playback
@@ -3461,15 +3460,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 }
                             }
                             
-                            // Remove original FEED_ITEM broadcast message for this item
-                                if (session.messages) {
-                                    session.messages = session.messages.filter(m =>
-                                        !(m.content && m.content.startsWith('FEED_ITEM:') && m.content.includes(`"id":"${feedItem.id}"`))
-                                    );
-                                }
-
-                                // Add delete notification to each session
-                                const deleteMessage = {
+                            // Add delete notification to each session
+                            const deleteMessage = {
                                 id: uuidv4(),
                                 sessionId: sessId,
                                 senderId: playerId,
@@ -3514,13 +3506,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                             if (index !== -1) {
                                 session.feedItems.splice(index, 1);
                             }
-                        }
-
-                        // Remove original FEED_ITEM broadcast message for this item
-                        if (session.messages) {
-                            session.messages = session.messages.filter(m =>
-                                !(m.content && m.content.startsWith('FEED_ITEM:') && m.content.includes(`"id":"${feedItem.id}"`))
-                            );
                         }
                     });
                     
