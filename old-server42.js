@@ -1,4 +1,3 @@
-// Stranded Astronaut Server version 135 -- Fix: delta sync now includes isDeleted items so clients can remove them from cache
 // Stranded Astronaut Server version 134 -- Fix: remove FEED_ITEM broadcast message from session.messages on delete
 // Stranded Astronaut Server version 133 -- Author guard + pre-update archive on UPDATE case (mirrors publish protection)
 // v132: Author guard on publish (reject overwrites by non-authors)
@@ -2973,8 +2972,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                 const sinceDate = new Date(sinceTimestamp);
                 console.log(`DEBUG-SYNC-SERVER: Delta sync request - items since ${sinceDate.toISOString()}`);
 
-                // Fix for Server side deletes
                 FeedItem.find({
+                    isDeleted: false,
                     $or: [
                         { updatedAt: { $gt: sinceDate } },
                         { updatedAt: null, timestamp: { $gt: sinceDate } }
