@@ -1,9 +1,4 @@
-// Stranded Astronaut Server version 137
-// v137: UUID validation on publish -- if incoming id is absent or not a valid
-//   RFC 4122 UUID, server assigns uuidv4() and logs a warning. Prevents items
-//   created via curl with short/numeric/missing id from generating permanent
-//   client-side duplicates via the random UUID fallback in FeedSyncAdapter.
-//   See FeedItemSystem_v9.md -- FeedItem Identity section.
+// Stranded Astronaut Server version 136
 // v136: Active Users feature
 //   - Module-scope activeUsers Map: tracks { username, deviceName, lastSeen } per playerId
 //   - POST /feed case 'get': updates activeUsers on every sync (delta + full)
@@ -2499,18 +2494,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.feedItemID = (feedItemIdCounter++).toString();
                     console.log(`Assigned new feedItemID: ${processedItem.feedItemID}`);
                 }
-
-                // UUID validation: ensure id is a valid RFC 4122 UUID.
-                // Items created via curl with a short/numeric/missing id generate
-                // different random UUIDs on every client parse, causing permanent duplicates.
-                // See FeedItemSystem_v9.md -- FeedItem Identity section.
-                const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-                if (!processedItem.id || !uuidRegex.test(processedItem.id)) {
-                    const assignedId = uuidv4();
-                    console.log(`WARN-IDENTITY: Item "${processedItem.title}" had invalid/missing id "${processedItem.id}" -- assigned new UUID: ${assignedId}`);
-                    processedItem.id = assignedId;
-                }
-
+                
                 // CRITICAL FIX: Ensure parentId is correctly preserved
                 if (feedItem.parentId) {
                     // Always store parentId as received without modification
