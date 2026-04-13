@@ -1,113 +1,83 @@
 # dWorld Server API Guide
 
+## âš ï¸ CRITICAL: READ THIS FIRST
+
+**Claude: Every time you need to query the server, you make the same mistakes. READ THIS ENTIRE SECTION before writing any curl commands.**
+
+### The Three Rules You Always Forget:
+
+1. **You MUST get a playerId first** - The `/sync` endpoint requires a valid playerId from `/join`
+2. **FeedItems are wrapped in `._doc`** - Access fields as `._doc.title`, NOT `.title`
+3. **Use POST, not GET** - The endpoint is `POST /sync`, there is NO `GET /feeditems`
+
+---
+
 ## Server Information
+
 - **Production URL**: `https://stranded-astronaut-server-production.up.railway.app`
 - **API Key (Bearer Token)**: `b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA`
+- **Session ID**: `dworld-global-session` (always use this)
 
 ---
 
-## Authentication
+## STEP-BY-STEP: How to Query Feed Items
 
-All API requests require the Bearer token in the Authorization header:
+### Step 1: Get a Player ID (REQUIRED)
 
-```bash
--H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA"
-```
-
----
-
-## Common Workflows
-
-### 1. Test Server Connection
+You CANNOT skip this step. The /sync endpoint will return null without a valid playerId.
 
 ```bash
-curl -X POST https://stranded-astronaut-server-production.up.railway.app/ping \
-  -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA"
-```
-
-**Response:**
-```json
-{"success":true,"timestamp":1762458531567}
-```
-
----
-
-### 2. Join the Global Session
-
-Before you can access feed items, you MUST join the dWorld global session:
-
-```bash
-curl -X POST "https://stranded-astronaut-server-production.up.railway.app/join" \
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/join" \
   -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" \
   -H "Content-Type: application/json" \
-  -d '{
-    "appName": "dWorld",
-    "playerName": "jefferson"
-  }'
+  -d '{"appName": "dWorld", "playerName": "claude"}'
 ```
 
-**Response:**
-```json
-{
-  "sessionId": "dworld-global-session",
-  "sessionName": "dWorld Global Session",
-  "shortCode": "DWORLD",
-  "player": {
-    "id": "6aef6d14-10e8-413f-9653-cd5b4021b040",
-    "name": "jefferson",
-    "role": "Member",
-    "isHuman": true,
-    "isActive": true,
-    "currentLocation": "0,1,2,1,2",
-    "inventory": {},
-    "lastActivity": "2025-11-07T23:44:33.943Z",
-    "profileData": {
-      "username": "jefferson",
-      "organizations": ["Resistance"],
-      "topicFilters": [],
-      "dateJoined": "2025-11-07T23:44:33.943Z"
-    }
-  },
-  "globalTurn": 0,
-  "timeElapsed": "1h 0m"
-}
-```
+**Save the `player.id` from the response.** Example: `f2058164-3f93-4bfb-8c16-45bbe8ee509b`
 
-**Save the `player.id` - you'll need it for all subsequent requests!**
-
----
-
-### 3. Get All Feed Items
+### Step 2: Query Feed Items with the Player ID
 
 ```bash
-curl -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
   -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" \
   -H "Content-Type: application/json" \
   -d '{
     "sessionId": "dworld-global-session",
-    "playerId": "YOUR_PLAYER_ID_FROM_JOIN",
+    "playerId": "YOUR_PLAYER_ID_HERE",
     "includeAllItems": true
   }'
 ```
 
-**Response Structure:**
+---
+
+## âš ï¸ CRITICAL: The `._doc` Wrapper
+
+The MongoDB driver wraps all document fields in a `._doc` object. You MUST access fields through this wrapper.
+
+### WRONG (will return null):
+```bash
+jq '.feedItems[] | select(.title | contains("50th"))'
+```
+
+### CORRECT:
+```bash
+jq '.feedItems[] | select(._doc.title != null and (._doc.title | contains("50th")))'
+```
+
+### Response Structure (Actual):
 ```json
 {
-  "players": {...},
-  "gameState": {...},
   "feedItems": [
     {
-      "id": "...",
-      "type": "text",
-      "title": "...",
-      "content": "...",
-      "author": "jefferson",
-      "isDirectMessage": true,
-      "recipients": ["george"],
-      "encryptedData": "...",
-      "encryptionStatus": "encrypted",
-      "encryptedMessageId": "...",
-      ...
+      "_doc": {
+        "title": "50th multi-recipient DM test",
+        "content": "[Encrypted Message]",
+        "author": "Hancock",
+        "recipients": ["George"],
+        "encryptionStatus": "encrypted",
+        "encryptedData": {...},
+        "isDirectMessage": true
+      }
     }
   ]
 }
@@ -115,146 +85,207 @@ curl -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" 
 
 ---
 
-### 4. Filter Feed Items with jq
+## Verified Working Examples (November 25, 2025)
 
-#### Get All Direct Messages
+### Example 1: Find a specific message by title
+
 ```bash
-curl -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
   -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" \
   -H "Content-Type: application/json" \
   -d '{
     "sessionId": "dworld-global-session",
-    "playerId": "YOUR_PLAYER_ID",
+    "playerId": "f2058164-3f93-4bfb-8c16-45bbe8ee509b",
     "includeAllItems": true
-  }' | jq '.feedItems[] | select(.isDirectMessage == true)'
+  }' | jq '.feedItems[] | select(._doc.title != null and (._doc.title | contains("50th"))) | {title: ._doc.title, content: ._doc.content, encryptionStatus: ._doc.encryptionStatus, recipients: ._doc.recipients, hasEncryptedData: (._doc.encryptedData != null)}'
 ```
 
-#### Get Encrypted Messages Only
-```bash
-curl -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
-  -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sessionId": "dworld-global-session",
-    "playerId": "YOUR_PLAYER_ID",
-    "includeAllItems": true
-  }' | jq '.feedItems[] | select(.encryptionStatus == "encrypted")'
+**Verified Output:**
+```json
+{
+  "title": "50th multi-recipient DM test",
+  "content": "[Encrypted Message]",
+  "encryptionStatus": "encrypted",
+  "recipients": ["George"],
+  "hasEncryptedData": true
+}
+{
+  "title": "50th multi-recipient DM test",
+  "content": "[Encrypted Message]",
+  "encryptionStatus": "encrypted",
+  "recipients": ["Jefferson"],
+  "hasEncryptedData": true
+}
 ```
 
-#### Get Specific Feed Item by Title
+### Example 2: Find message by title AND specific recipient
+
 ```bash
-curl -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
   -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" \
   -H "Content-Type: application/json" \
   -d '{
     "sessionId": "dworld-global-session",
-    "playerId": "YOUR_PLAYER_ID",
+    "playerId": "f2058164-3f93-4bfb-8c16-45bbe8ee509b",
     "includeAllItems": true
-  }' | jq '.feedItems[] | select(.title | contains("3rd attempt"))'
+  }' | jq '.feedItems[] | select(._doc.title != null and (._doc.title | contains("46th")) and (._doc.recipients[0] == "Jefferson")) | {title: ._doc.title, isEncrypted: ._doc.isEncrypted, encryptionStatus: ._doc.encryptionStatus, isDirectMessage: ._doc.isDirectMessage, recipients: ._doc.recipients, hasEncryptedData: (._doc.encryptedData != null)}'
 ```
 
-#### Get Encryption Fields for All DMs
+**Verified Output:**
+```json
+{
+  "title": "46th DM Test",
+  "isEncrypted": null,
+  "encryptionStatus": "encrypted",
+  "isDirectMessage": true,
+  "recipients": ["Jefferson"],
+  "hasEncryptedData": true
+}
+```
+
+### Example 3: Get all encrypted DMs with key fields
+
 ```bash
-curl -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
   -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" \
   -H "Content-Type: application/json" \
   -d '{
     "sessionId": "dworld-global-session",
-    "playerId": "YOUR_PLAYER_ID",
+    "playerId": "f2058164-3f93-4bfb-8c16-45bbe8ee509b",
     "includeAllItems": true
-  }' | jq '.feedItems[] | select(.isDirectMessage == true) | {
-    id, 
-    title, 
-    content, 
-    encryptedData, 
-    encryptionStatus, 
-    encryptedMessageId,
-    recipients
-  }'
+  }' | jq '.feedItems[] | select(._doc.encryptionStatus == "encrypted") | {title: ._doc.title, author: ._doc.author, recipients: ._doc.recipients, hasEncryptedData: (._doc.encryptedData != null)}'
+```
+
+### Example 4: Count total feed items
+
+```bash
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
+  -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionId": "dworld-global-session",
+    "playerId": "f2058164-3f93-4bfb-8c16-45bbe8ee509b",
+    "includeAllItems": true
+  }' | jq '.feedItems | length'
 ```
 
 ---
 
-## Quick Reference Commands
+## Complete One-Liner Workflow
 
-### Complete Workflow to Check an Encrypted DM
+For when you need to get everything in one go:
 
 ```bash
-# Step 1: Join and save playerId
+# Get player ID and immediately query
 PLAYER_ID=$(curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/join" \
   -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" \
   -H "Content-Type: application/json" \
-  -d '{"appName": "dWorld", "playerName": "jefferson"}' | jq -r '.player.id')
-
-echo "Player ID: $PLAYER_ID"
-
-# Step 2: Get encrypted DM details
-curl -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
+  -d '{"appName": "dWorld", "playerName": "claude"}' | jq -r '.player.id') && \
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" \
   -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" \
   -H "Content-Type: application/json" \
-  -d "{
-    \"sessionId\": \"dworld-global-session\",
-    \"playerId\": \"$PLAYER_ID\",
-    \"includeAllItems\": true
-  }" | jq '.feedItems[] | select(.encryptionStatus == "encrypted") | {
-    title,
-    author,
-    recipients,
-    encryptionStatus,
-    hasEncryptedData: (.encryptedData != null),
-    encryptedDataSize: (.encryptedData | length)
-  }'
+  -d "{\"sessionId\": \"dworld-global-session\", \"playerId\": \"$PLAYER_ID\", \"includeAllItems\": true}" | jq '.feedItems[] | select(._doc.title != null) | {title: ._doc.title, author: ._doc.author}'
 ```
 
 ---
 
-## Important Constants
+## Signal Keys API
 
-- **Session ID**: `dworld-global-session` (always use this for dWorld app)
-- **App Name**: `dWorld` (required in join request)
-- **API Key**: `b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA`
+### Check a user's public keys on the server
 
----
+```bash
+curl -s -X GET "https://stranded-astronaut-server-production.up.railway.app/signal/keys?username=George" \
+  -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA"
+```
 
-## Troubleshooting
+### Delete a user's keys (forces regeneration)
 
-### Error: "Session not found"
-**Solution**: You forgot to join the session first. Run the `/join` endpoint.
-
-### Error: "Cannot GET /feed"
-**Solution**: The endpoint is `/sync` (POST), not `/feed` (GET).
-
-### jq Error: "Cannot iterate over null"
-**Solution**: The field you're filtering on doesn't exist. Check the actual response structure first without jq.
-
-### No results returned
-**Solution**: The filter might be too strict. Try removing filters one by one to see what data exists.
+```bash
+curl -s -X DELETE "https://stranded-astronaut-server-production.up.railway.app/signal/keys/George" \
+  -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA"
+```
 
 ---
 
-## Schema Reference
+## Common Mistakes (Claude, Don't Do These)
 
-### FeedItem Fields (with Encryption)
+### Mistake 1: Using GET instead of POST
+```bash
+# WRONG - This endpoint doesn't exist
+curl -X GET "https://stranded-astronaut-server-production.up.railway.app/feeditems"
+
+# CORRECT
+curl -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" ...
+```
+
+### Mistake 2: Forgetting the playerId
+```bash
+# WRONG - Returns null/empty
+curl -X POST ".../sync" -d '{"sessionId": "dworld-global-session", "includeAllItems": true}'
+
+# CORRECT - Must include playerId
+curl -X POST ".../sync" -d '{"sessionId": "dworld-global-session", "playerId": "xxx", "includeAllItems": true}'
+```
+
+### Mistake 3: Not using ._doc wrapper in jq
+```bash
+# WRONG - Returns nothing
+jq '.feedItems[] | select(.title | contains("test"))'
+
+# CORRECT - Use ._doc wrapper
+jq '.feedItems[] | select(._doc.title != null and (._doc.title | contains("test")))'
+```
+
+### Mistake 4: Using wrong URL
+```bash
+# WRONG URLs
+https://dworld-1-production.up.railway.app  # Old/wrong
+https://stranded-astronaut.railway.app      # Missing full domain
+
+# CORRECT URL
+https://stranded-astronaut-server-production.up.railway.app
+```
+
+### Mistake 5: Forgetting null check before string operations
+```bash
+# WRONG - Crashes if title is null
+jq '.feedItems[] | select(._doc.title | contains("test"))'
+
+# CORRECT - Check for null first
+jq '.feedItems[] | select(._doc.title != null and (._doc.title | contains("test")))'
+```
+
+---
+
+## FeedItem Schema
+
+### Fields inside `._doc`:
 
 ```javascript
 {
-  id: String (UUID),
-  type: String (text|image|video|audio|web|presentation|event),
+  _id: ObjectId,
   title: String,
-  content: String (plaintext if not encrypted),
+  content: String,                    // "[Encrypted Message]" if encrypted
   author: String,
   authorId: String,
   organization: String,
   timestamp: Date,
-  isDirectMessage: Boolean,
-  recipients: [String],
-  isGroupMessage: Boolean,
-  groupName: String,
+  type: String,                       // text|image|video|audio|web|presentation|event
   
-  // Encryption Fields (NEW)
-  encryptedData: Buffer (binary encrypted content),
-  encryptionStatus: String (legacy|encrypted|public),
-  encryptedMessageId: String (UUID for encrypted messages),
+  // Direct Message fields
+  isDirectMessage: Boolean,
+  recipients: [String],               // Array of recipient usernames
+  
+  // Encryption fields
+  encryptedData: Buffer/Object,       // The encrypted blob
+  encryptionStatus: String,           // "legacy"|"encrypted"|"public"
+  encryptedMessageId: String,         // UUID linking split messages
+  encryptedDataPerRecipient: Object,  // Per-recipient encrypted data (if used)
+  
+  // Engagement fields
+  approvalCount: Number,
+  disapprovalCount: Number,
+  commentCount: Number,
   
   // Media fields
   imageUrl: String,
@@ -263,21 +294,131 @@ curl -X POST "https://stranded-astronaut-server-production.up.railway.app/sync" 
   audioUrl: String,
   
   // Other fields
-  parentId: String (for comments),
-  commentCount: Number,
-  approvalCount: Number,
-  disapprovalCount: Number,
-  topics: [String],
   isDeleted: Boolean,
-  isRepost: Boolean
+  isRepost: Boolean,
+  topics: [String],
+  parentId: String
 }
 ```
 
 ---
 
-## Notes
+## Troubleshooting
 
-- The server uses MongoDB, so new schema fields are automatically added when you send them
-- Always use `includeAllItems: true` to get the complete feed
-- Player IDs are temporary and change each time you join
-- The session `dworld-global-session` is permanent and shared by all users
+### Error: "Cannot iterate over null (null)"
+**Cause**: feedItems is null because you didn't provide a valid playerId  
+**Solution**: Get a playerId from /join first
+
+### Error: No results from jq filter
+**Cause 1**: Not using `._doc` wrapper  
+**Cause 2**: Not checking for null before string operations  
+**Solution**: Use `select(._doc.field != null and (._doc.field | contains("x")))`
+
+### Error: "Session not found"
+**Cause**: Invalid or missing sessionId  
+**Solution**: Always use `"sessionId": "dworld-global-session"`
+
+### Empty response
+**Cause**: Missing `includeAllItems: true`  
+**Solution**: Always include `"includeAllItems": true` in the request body
+
+---
+
+## Quick Reference
+
+| What You Need | Endpoint | Method |
+|---------------|----------|--------|
+| Get player ID | /join | POST |
+| Get feed items | /sync | POST |
+| Get user's Signal keys | /signal/keys?username=X | GET |
+| Delete user's Signal keys | /signal/keys/X | DELETE |
+| Test connection | /ping | POST |
+
+---
+
+## Constants
+
+```
+Server URL:    https://stranded-astronaut-server-production.up.railway.app
+API Key:       b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA
+Session ID:    dworld-global-session
+App Name:      dWorld
+```
+
+---
+
+## ⚠️ CRITICAL: Posting TheBook Chapters
+
+**Claude: When asked to post chapters to TheBook, follow these rules EXACTLY:**
+
+### Rule 1: NEVER Create Script Files
+
+DO NOT create Python scripts, shell scripts, or any downloadable files. The user's Downloads folder has macOS security restrictions that prevent execution.
+
+**WRONG:**
+- Creating `post_chapters.py` or `post_chapters.sh`
+- Telling user to download and run a file
+- Using `mv` commands to move files around
+
+**CORRECT:**
+- Provide curl commands directly in the chat for copy-paste into Terminal
+
+### Rule 2: Get Player ID First
+
+Have the user run this and give you the ID:
+
+```bash
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/join" -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" -H "Content-Type: application/json" -d '{"appName": "dWorld", "playerName": "garrett"}' | jq -r '.player.id'
+```
+
+### Rule 3: Provide Single-Line Curl Commands
+
+Each chapter should be a single curl command the user can copy-paste. Chain multiple chapters with `&&`:
+
+```bash
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/feed" -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" -H "Content-Type: application/json" -d '{"sessionId":"dworld-global-session","playerId":"PLAYER_ID_HERE","action":"publish","feedItem":{"id":"VALID-UUID-HERE","type":"text","title":"Chapter Title","chapterNumber":"X.Y","content":"Chapter content here with escaped quotes and newlines","author":"Garrett Gruener","organization":"Digital Republic","isTheBook":true,"isLibraryDocument":true}}' && curl -s -X POST ... && echo "Done"
+```
+
+### Rule 4: TheBook FeedItem Structure
+
+Required fields for TheBook chapters:
+
+```json
+{
+  "id": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",  // Valid UUID, uppercase
+  "type": "text",
+  "title": "Chapter Title",
+  "chapterNumber": "X.Y",                        // e.g., "8.0", "10.3"
+  "content": "Full chapter content...",
+  "author": "Garrett Gruener",
+  "organization": "Digital Republic",
+  "isTheBook": true,
+  "isLibraryDocument": true
+}
+```
+
+### Rule 5: Content Escaping
+
+In the JSON content field:
+- Use `\n` for newlines
+- Escape double quotes as needed or avoid them
+- Keep apostrophes as-is (single quotes inside double-quoted JSON are fine)
+
+### Rule 6: Actions
+
+- `"action": "publish"` - Create new chapter
+- `"action": "update"` - Update existing chapter (must use same ID)
+- `"action": "delete"` - Delete chapter: `{"action":"delete","feedItem":{"id":"UUID"}}`
+
+### Example: Posting Multiple Chapters
+
+```bash
+curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/feed" -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" -H "Content-Type: application/json" -d '{"sessionId":"dworld-global-session","playerId":"1c2c5fb9-a322-4aaa-a4bb-6adbd2a13dda","action":"publish","feedItem":{"id":"8A0B0C0D-0E0F-8000-0000-000000000000","type":"text","title":"The Failure Modes","chapterNumber":"8.0","content":"Chapter 8 intro content here...","author":"Garrett Gruener","organization":"Digital Republic","isTheBook":true,"isLibraryDocument":true}}' && curl -s -X POST "https://stranded-astronaut-server-production.up.railway.app/feed" -H "Authorization: Bearer b4cH9Pp2Kt8fRjX7eLw6Ts5qZmN3vDyA" -H "Content-Type: application/json" -d '{"sessionId":"dworld-global-session","playerId":"1c2c5fb9-a322-4aaa-a4bb-6adbd2a13dda","action":"publish","feedItem":{"id":"8A1B1C1D-1E1F-8111-1111-111111111111","type":"text","title":"The Root of Identity","chapterNumber":"8.1","content":"Chapter 8.1 content here...","author":"Garrett Gruener","organization":"Digital Republic","isTheBook":true,"isLibraryDocument":true}}' && echo "All chapters posted."
+```
+
+**Expected output:** `{"success":true,"feedItemId":"...","feedItemID":"..."}` for each chapter, then "All chapters posted."
+
+---
+
+**Last Updated:** January 23, 2026  
+**Verified Working:** All examples tested and confirmed working

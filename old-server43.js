@@ -1,11 +1,3 @@
-// Stranded Astronaut Server version 136
-// v136: Active Users feature
-//   - Module-scope activeUsers Map: tracks { username, deviceName, lastSeen } per playerId
-//   - POST /feed case 'get': updates activeUsers on every sync (delta + full)
-//   - Debounced MongoDB write-through: at most once per 30s per player
-//   - GET /active-users?since=N: returns players seen within last N seconds (default 60)
-//   - MongoDB active_users collection with TTL index (auto-deletes after 24h)
-//   - Startup: seeds in-memory map from MongoDB so recent users survive restarts
 // Stranded Astronaut Server version 135 -- Fix: delta sync now includes isDeleted items so clients can remove them from cache
 // Stranded Astronaut Server version 134 -- Fix: remove FEED_ITEM broadcast message from session.messages on delete
 // Stranded Astronaut Server version 133 -- Author guard + pre-update archive on UPDATE case (mirrors publish protection)
@@ -72,12 +64,6 @@ global.pendingDirectMessages = {};
 global.mediaContent = {};
 if (!global.muxStreams) global.muxStreams = {};
 const MAX_MEDIA_SIZE = 10 * 1024 * 1024;
-
-// Active Users tracking
-// In-memory map: playerId -> { username, deviceName, lastSeen }
-// Updated on every POST /feed. Persisted to MongoDB (debounced, max 1 write/30s/player).
-const activeUsers = new Map();
-const activeUserLastPersisted = new Map(); // playerId -> Date of last MongoDB write
 
 // MongoDB connection setup
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/dworld';
@@ -275,17 +261,6 @@ keyChangeNotificationSchema.index({ senderUsername: 1, status: 1 });
 keyChangeNotificationSchema.index({ createdAt: 1 });
 
 const KeyChangeNotification = mongoose.model('KeyChangeNotification', keyChangeNotificationSchema);
-
-// Active Users schema (lightweight presence tracking)
-const activeUserSchema = new mongoose.Schema({
-    playerId:   { type: String, required: true, unique: true, index: true },
-    username:   { type: String, default: 'Anonymous' },
-    deviceName: { type: String, default: null },
-    lastSeen:   { type: Date,   required: true, index: true }
-});
-// TTL index: MongoDB auto-deletes documents 24h after lastSeen
-activeUserSchema.index({ lastSeen: 1 }, { expireAfterSeconds: 86400 });
-const ActiveUser = mongoose.model('ActiveUser', activeUserSchema);
 
 // v130: Plot Analytics Schema -- anonymous org-level aggregation (no userId, no PII)
 const plotAnalyticsSummarySchema = new mongoose.Schema({
@@ -589,31 +564,6 @@ app.get('/debug/duplicates', validateApiKey, (req, res) => {
 });
 
 // Test endpoint for comments
-// GET /active-users?since=60
-// Returns players seen within the last `since` seconds (default 60, max 3600).
-// Response: { activeUsers: [{ username, deviceName, lastSeen }], count, sinceSeconds }
-app.get('/active-users', validateApiKey, (req, res) => {
-    const sinceSeconds = Math.min(parseInt(req.query.since) || 60, 3600);
-    const cutoff = new Date(Date.now() - sinceSeconds * 1000);
-
-    const active = [];
-    for (const [, info] of activeUsers.entries()) {
-        if (info.lastSeen >= cutoff) {
-            active.push({
-                username:   info.username,
-                deviceName: info.deviceName,
-                lastSeen:   info.lastSeen.toISOString()
-            });
-        }
-    }
-
-    // Sort most-recently-seen first
-    active.sort((a, b) => new Date(b.lastSeen) - new Date(a.lastSeen));
-
-    console.log(`DEBUG-ACTIVE-USERS: ${active.length} users active in last ${sinceSeconds}s`);
-    res.json({ activeUsers: active, count: active.length, sinceSeconds });
-});
-
 app.get('/debug/comments/:feedItemId', validateApiKey, (req, res) => {
    const feedItemId = req.params.feedItemId;
    
@@ -659,22 +609,7 @@ mongoose.connect(mongoUri, {
  useUnifiedTopology: true
 }).then(() => {
  console.log('Connected to MongoDB database');
-
- // Seed active users map from MongoDB (so recent users survive restarts)
- const seedCutoff = new Date(Date.now() - 60 * 1000); // last 60s
- ActiveUser.find({ lastSeen: { $gte: seedCutoff } }).then(docs => {
-     docs.forEach(doc => {
-         activeUsers.set(doc.playerId, {
-             username: doc.username,
-             deviceName: doc.deviceName,
-             lastSeen: doc.lastSeen
-         });
-     });
-     console.log(`Active users: seeded ${docs.length} recent entries from MongoDB`);
- }).catch(err => {
-     console.error(`Active users: failed to seed from MongoDB: ${err}`);
- });
-
+ 
  // Load initial items AND rebuild media content
  return loadItemsFromDatabase();
 }).then(items => {
@@ -3030,32 +2965,6 @@ app.post('/feed', validateApiKey, (req, res) => {
 
         // Find the 'get' case in the switch statement of the /feed endpoint
         case 'get':
-            // Active Users: record this player's presence on every sync
-            if (req.body.playerId) {
-                const _pid = req.body.playerId;
-                const _now = new Date();
-                activeUsers.set(_pid, {
-                    username:   req.body.username   || 'Anonymous',
-                    deviceName: req.body.deviceName || null,
-                    lastSeen:   _now
-                });
-                // Debounced MongoDB write: at most once per 30 seconds per player
-                const _lastPersist = activeUserLastPersisted.get(_pid);
-                if (!_lastPersist || (_now - _lastPersist) > 30000) {
-                    activeUserLastPersisted.set(_pid, _now);
-                    ActiveUser.findOneAndUpdate(
-                        { playerId: _pid },
-                        { playerId: _pid,
-                          username:   req.body.username   || 'Anonymous',
-                          deviceName: req.body.deviceName || null,
-                          lastSeen:   _now },
-                        { upsert: true, new: true }
-                    ).catch(err => {
-                        console.error(`Active users: MongoDB write error for ${_pid}: ${err}`);
-                    });
-                }
-            }
-
             // Delta sync support
             const sinceTimestamp = req.body.sinceTimestamp;
 
