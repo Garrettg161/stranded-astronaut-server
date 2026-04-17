@@ -1,7 +1,4 @@
-// Stranded Astronaut Server version 138
-// v138: Case-insensitive session.messages filter in delete handler --
-//   FEED_ITEM: broadcasts now correctly removed when deleter's platform
-//   differs from publisher's platform (iOS uppercase vs Android lowercase UUIDs)
+// Stranded Astronaut Server version 137
 // v137: UUID validation on publish -- if incoming id is absent or not a valid
 //   RFC 4122 UUID, server assigns uuidv4() and logs a warning. Prevents items
 //   created via curl with short/numeric/missing id from generating permanent
@@ -3578,7 +3575,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                             // Remove original FEED_ITEM broadcast message for this item
                                 if (session.messages) {
                                     session.messages = session.messages.filter(m =>
-                                        !(m.content && m.content.startsWith('FEED_ITEM:') && m.content.toLowerCase().includes(`"id":"${deleteId}"`))
+                                        !(m.content && m.content.startsWith('FEED_ITEM:') && m.content.includes(`"id":"${feedItem.id}"`))
                                     );
                                 }
 
