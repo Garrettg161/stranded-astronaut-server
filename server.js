@@ -3539,19 +3539,22 @@ app.post('/feed', validateApiKey, (req, res) => {
         case 'delete':
             // Delete logic
             if (feedItem && feedItem.id) {
-                console.log(`Deleting feed item: ${feedItem.id}`);
-                
+                // v136: Case-insensitive ID matching -- iOS sends uppercase, Android sends lowercase
+                const deleteId = feedItem.id.toLowerCase();
+                console.log(`Deleting feed item: ${feedItem.id} (normalized: ${deleteId})`);
+
                 // Mark as deleted in MongoDB (soft delete)
+                // Case-insensitive regex match handles both uppercase and lowercase IDs
                 FeedItem.findOneAndUpdate(
-                    { id: feedItem.id },
+                    { id: { $regex: new RegExp(`^${deleteId}$`, 'i') } },
                     { isDeleted: true, updatedAt: new Date() },
                     { new: true }
                 ).then(deletedItem => {
                     if (deletedItem) {
                         console.log(`Item marked as deleted in MongoDB: ${deletedItem.id}`);
-                        
-                        // Remove from global array
-                        const globalIndex = global.allFeedItems.findIndex(item => item.id === feedItem.id);
+
+                        // Remove from global array (case-insensitive)
+                        const globalIndex = global.allFeedItems.findIndex(item => item.id.toLowerCase() === deleteId);
                         if (globalIndex !== -1) {
                             global.allFeedItems.splice(globalIndex, 1);
                             console.log(`Removed item from global feed items`);
@@ -3562,7 +3565,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                             const session = gameSessions[sessId];
                             
                             if (session.feedItems) {
-                                const index = session.feedItems.findIndex(item => item.id === feedItem.id);
+                                const index = session.feedItems.findIndex(item => item.id.toLowerCase() === deleteId);
                                 if (index !== -1) {
                                     session.feedItems.splice(index, 1);
                                     console.log(`Removed item from session ${sessId}`);
