@@ -3075,6 +3075,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                 }
             }
 
+            // Tombstone support -- extract here so both delta and full sync can use it
+            const includeTombstones = req.body.includeTombstones === true;
+            const sinceTombstoneTs = req.body.sinceTombstoneTimestamp;
+
             // Delta sync support
             const sinceTimestamp = req.body.sinceTimestamp;
 
@@ -3102,13 +3106,53 @@ app.post('/feed', validateApiKey, (req, res) => {
                         return itemObj;
                     });
 
-                    res.json({
-                        success: true,
-                        isDelta: true,
-                        sinceTimestamp: sinceTimestamp,
-                        serverTimestamp: new Date().toISOString(),
-                        feedItems: itemsForTransmission
-                    });
+                    // 2026-04-24: Include tombstones in delta response if client requested them.
+                    // This covers items deleted BEFORE the client's sinceTimestamp that still
+                    // survive in the client's disk cache from a previous session.
+                    if (includeTombstones) {
+                        const tombstoneQuery = { isDeleted: true };
+                        if (sinceTombstoneTs) {
+                            const sinceTs = new Date(sinceTombstoneTs);
+                            if (!isNaN(sinceTs.getTime())) {
+                                tombstoneQuery.updatedAt = { $gt: sinceTs };
+                            }
+                        }
+                        FeedItem.find(tombstoneQuery)
+                            .select('id updatedAt')
+                            .then(tombstones => {
+                                const tombstoneList = tombstones.map(t => ({
+                                    id: t.id,
+                                    updatedAt: t.updatedAt
+                                }));
+                                console.log(`DEBUG-SYNC-SERVER: Delta returning ${itemsForTransmission.length} items + ${tombstoneList.length} tombstones`);
+                                res.json({
+                                    success: true,
+                                    isDelta: true,
+                                    sinceTimestamp: sinceTimestamp,
+                                    serverTimestamp: new Date().toISOString(),
+                                    feedItems: itemsForTransmission,
+                                    tombstones: tombstoneList
+                                });
+                            })
+                            .catch(tombErr => {
+                                console.error(`DEBUG-SYNC-SERVER: Delta tombstone query failed: ${tombErr}`);
+                                res.json({
+                                    success: true,
+                                    isDelta: true,
+                                    sinceTimestamp: sinceTimestamp,
+                                    serverTimestamp: new Date().toISOString(),
+                                    feedItems: itemsForTransmission
+                                });
+                            });
+                    } else {
+                        res.json({
+                            success: true,
+                            isDelta: true,
+                            sinceTimestamp: sinceTimestamp,
+                            serverTimestamp: new Date().toISOString(),
+                            feedItems: itemsForTransmission
+                        });
+                    }
                 })
                 .catch(err => {
                     console.error(`Delta sync error: ${err}`);
@@ -3150,11 +3194,6 @@ app.post('/feed', validateApiKey, (req, res) => {
             // never learn that X is gone -- full sync only returns alive items, and merge logic
             // never removes items just because they're absent from the response.
             //
-            // Client may also send sinceTombstoneTimestamp to bound the tombstone list (otherwise
-            // every soft-deleted record ever is returned, which grows unbounded).
-            const includeTombstones = req.body.includeTombstones === true;
-            const sinceTombstoneTs = req.body.sinceTombstoneTimestamp;
-
             FeedItem.find({ isDeleted: false })
                 .select('-attributedContentData -imageData -videoData -audioData')
                 .then(items => {
