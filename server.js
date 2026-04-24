@@ -3142,6 +3142,19 @@ app.post('/feed', validateApiKey, (req, res) => {
 
             // FULL SYNC (original behavior, backward compatible)
             // CRITICAL FIX: Exclude large binary fields to prevent OOM on Android
+            //
+            // 2026-04-24 ADDITION: Optionally include `tombstones` (array of {id, updatedAt} for
+            // soft-deleted records) when client sends includeTombstones: true. This lets cold-start
+            // clients learn about deletions that happened while they were offline. Without this,
+            // a client whose disk cache contains item X, then comes back after X was deleted, would
+            // never learn that X is gone -- full sync only returns alive items, and merge logic
+            // never removes items just because they're absent from the response.
+            //
+            // Client may also send sinceTombstoneTimestamp to bound the tombstone list (otherwise
+            // every soft-deleted record ever is returned, which grows unbounded).
+            const includeTombstones = req.body.includeTombstones === true;
+            const sinceTombstoneTs = req.body.sinceTombstoneTimestamp;
+
             FeedItem.find({ isDeleted: false })
                 .select('-attributedContentData -imageData -videoData -audioData')
                 .then(items => {
@@ -3170,13 +3183,52 @@ app.post('/feed', validateApiKey, (req, res) => {
                         return itemObj;
                     });
                     
-                    // Return the transformed items
-                    res.json({
-                        success: true,
-                        isDelta: false,
-                        serverTimestamp: new Date().toISOString(),
-                        feedItems: itemsForTransmission
-                    });
+                    // Build response. If client requested tombstones, query for soft-deleted records
+                    // and attach them. Otherwise omit the field entirely (backward compatibility).
+                    if (includeTombstones) {
+                        const tombstoneQuery = { isDeleted: true };
+                        if (sinceTombstoneTs) {
+                            const sinceDate = new Date(sinceTombstoneTs);
+                            if (!isNaN(sinceDate.getTime())) {
+                                tombstoneQuery.updatedAt = { $gt: sinceDate };
+                            }
+                        }
+                        FeedItem.find(tombstoneQuery)
+                            .select('id updatedAt')
+                            .then(tombstones => {
+                                const tombstoneList = tombstones.map(t => ({
+                                    id: t.id,
+                                    updatedAt: t.updatedAt
+                                }));
+                                console.log(`DEBUG-SYNC-SERVER: Returning ${itemsForTransmission.length} alive items + ${tombstoneList.length} tombstones (sinceTombstoneTs=${sinceTombstoneTs || 'all-time'})`);
+                                res.json({
+                                    success: true,
+                                    isDelta: false,
+                                    serverTimestamp: new Date().toISOString(),
+                                    feedItems: itemsForTransmission,
+                                    tombstones: tombstoneList
+                                });
+                            })
+                            .catch(tombErr => {
+                                // If tombstone query fails, still return the alive items.
+                                // Client treats missing tombstones field as empty array (safe).
+                                console.error(`DEBUG-SYNC-SERVER: Tombstone query failed: ${tombErr}. Returning alive items only.`);
+                                res.json({
+                                    success: true,
+                                    isDelta: false,
+                                    serverTimestamp: new Date().toISOString(),
+                                    feedItems: itemsForTransmission
+                                });
+                            });
+                    } else {
+                        // Backward-compatible: no tombstones requested, original response shape
+                        res.json({
+                            success: true,
+                            isDelta: false,
+                            serverTimestamp: new Date().toISOString(),
+                            feedItems: itemsForTransmission
+                        });
+                    }
                 })
                 .catch(err => {
                     console.error(`Error getting items from MongoDB: ${err}`);
