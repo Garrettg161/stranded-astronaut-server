@@ -1,4 +1,32 @@
-// Stranded Astronaut Server version 129
+// Stranded Astronaut Server version 138
+// v138: Case-insensitive session.messages filter in delete handler --
+//   FEED_ITEM: broadcasts now correctly removed when deleter's platform
+//   differs from publisher's platform (iOS uppercase vs Android lowercase UUIDs)
+// v137: UUID validation on publish -- if incoming id is absent or not a valid
+//   RFC 4122 UUID, server assigns uuidv4() and logs a warning. Prevents items
+//   created via curl with short/numeric/missing id from generating permanent
+//   client-side duplicates via the random UUID fallback in FeedSyncAdapter.
+//   See FeedItemSystem_v9.md -- FeedItem Identity section.
+// v136: Active Users feature
+//   - Module-scope activeUsers Map: tracks { username, deviceName, lastSeen } per playerId
+//   - POST /feed case 'get': updates activeUsers on every sync (delta + full)
+//   - Debounced MongoDB write-through: at most once per 30s per player
+//   - GET /active-users?since=N: returns players seen within last N seconds (default 60)
+//   - MongoDB active_users collection with TTL index (auto-deletes after 24h)
+//   - Startup: seeds in-memory map from MongoDB so recent users survive restarts
+// Stranded Astronaut Server version 135 -- Fix: delta sync now includes isDeleted items so clients can remove them from cache
+// Stranded Astronaut Server version 134 -- Fix: remove FEED_ITEM broadcast message from session.messages on delete
+// Stranded Astronaut Server version 133 -- Author guard + pre-update archive on UPDATE case (mirrors publish protection)
+// v132: Author guard on publish (reject overwrites by non-authors)
+// v131: Mux live captions + VOD recording playback
+//   - Added generated_subtitles to create-live-stream (English auto-captions via Mux AI)
+//   - Enhanced stream-status to return recentAssetIds for VOD recording lookup
+//   - New endpoint: /video/asset-playback/:assetId -- returns VOD playback URL for completed broadcasts
+// v130: Influencer Analytics Dashboard
+//   - PlotAnalyticsSummary MongoDB schema (org-level aggregated plot question stats)
+//   - POST /analytics/plot-event -- anonymous, unauthenticated, rate-limited per IP (100/hr)
+//   - GET /analytics/dashboard/:orgId -- authenticated, returns per-question stats (min 25 responses)
+//   - GET /analytics/dashboard-ui/:orgId -- serves HTML dashboard page
 // v129: Added Mux video fields to FeedItem MongoDB schema
 //   - muxPlaybackId, muxStreamId, isLiveStream, liveStreamStatus now persist to database
 // v128: Mux video integration - live stream and VOD endpoints
@@ -53,6 +81,12 @@ global.mediaContent = {};
 if (!global.muxStreams) global.muxStreams = {};
 const MAX_MEDIA_SIZE = 10 * 1024 * 1024;
 
+// Active Users tracking
+// In-memory map: playerId -> { username, deviceName, lastSeen }
+// Updated on every POST /feed. Persisted to MongoDB (debounced, max 1 write/30s/player).
+const activeUsers = new Map();
+const activeUserLastPersisted = new Map(); // playerId -> Date of last MongoDB write
+
 // MongoDB connection setup
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/dworld';
 
@@ -66,6 +100,7 @@ const feedItemSchema = new mongoose.Schema({
    authorId: { type: String, required: true },
    organization: { type: String, default: 'Resistance' },
    timestamp: { type: Date, default: Date.now },
+   updatedAt: { type: Date, default: Date.now },  // Delta sync - tracks last modification time
    imageUrl: String,
    imageData: Buffer,
    imageContentType: String,
@@ -96,6 +131,14 @@ const feedItemSchema = new mongoose.Schema({
    isRepost: { type: Boolean, default: false },
    isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
    chapterNumber: String,  // Chapter numbering for TheBook (e.g., "1.1", "2.3")
+   isAIQuestion: { type: Boolean, default: false },  // AI Question feed item flag
+   aiQuestionText: String,  // Pre-written question text for AI injection
+   isDatabaseItem: { type: Boolean, default: false },  // Database FeedItem flag
+   databaseType: String,  // "poll", "petition", "pledge", "rsvp", etc.
+   isFundraising: { type: Boolean, default: false },   // Fundraising FeedItem flag
+   actBlueUrl: String,          // ActBlue campaign URL
+   fundraisingGoal: Number,     // Optional dollar target
+   fundraisingDescription: String,  // Why contribute body text
    metadata: mongoose.Schema.Types.Mixed,
    eventDescription: String,
    eventStartDate: Date,
@@ -140,6 +183,17 @@ const feedItemSchema = new mongoose.Schema({
 });
 
 const FeedItem = mongoose.model('FeedItem', feedItemSchema);
+
+// v4.6: FeedItem history schema for audit trail -- prevents data loss from ID collisions
+const feedItemHistorySchema = new mongoose.Schema({
+   feedItemId: { type: String, required: true, index: true },
+   operation: { type: String, required: true },
+   previousDocument: mongoose.Schema.Types.Mixed,
+   changedBy: String,
+   changedAt: { type: Date, default: Date.now },
+   reason: String
+});
+const FeedItemHistory = mongoose.model('FeedItemHistory', feedItemHistorySchema);
 
 // Signal Protocol key bundle schema
 const signalKeyBundleSchema = new mongoose.Schema({
@@ -230,6 +284,47 @@ keyChangeNotificationSchema.index({ createdAt: 1 });
 
 const KeyChangeNotification = mongoose.model('KeyChangeNotification', keyChangeNotificationSchema);
 
+// Active Users schema (lightweight presence tracking)
+const activeUserSchema = new mongoose.Schema({
+    playerId:   { type: String, required: true, unique: true, index: true },
+    username:   { type: String, default: 'Anonymous' },
+    deviceName: { type: String, default: null },
+    lastSeen:   { type: Date,   required: true, index: true }
+});
+// TTL index: MongoDB auto-deletes documents 24h after lastSeen
+activeUserSchema.index({ lastSeen: 1 }, { expireAfterSeconds: 86400 });
+const ActiveUser = mongoose.model('ActiveUser', activeUserSchema);
+
+// v130: Plot Analytics Schema -- anonymous org-level aggregation (no userId, no PII)
+const plotAnalyticsSummarySchema = new mongoose.Schema({
+    orgId:          { type: String, required: true },
+    questionNumber: { type: String, required: true },
+    questionText:   { type: String, required: true },
+    section:        { type: Number, required: true },
+    yesCount:       { type: Number, default: 0 },
+    noCount:        { type: Number, default: 0 },
+    updatedAt:      { type: Date, default: Date.now }
+});
+plotAnalyticsSummarySchema.index({ orgId: 1, questionNumber: 1 }, { unique: true });
+const PlotAnalyticsSummary = mongoose.model('PlotAnalyticsSummary', plotAnalyticsSummarySchema);
+
+// v130: In-memory rate limiter for anonymous analytics endpoint (100 req/hr per IP)
+const analyticsRateLimit = new Map();
+function checkAnalyticsRateLimit(ip) {
+    const now = Date.now();
+    const windowMs = 60 * 60 * 1000; // 1 hour
+    const maxRequests = 100;
+    const entry = analyticsRateLimit.get(ip) || { count: 0, windowStart: now };
+    if (now - entry.windowStart > windowMs) {
+        analyticsRateLimit.set(ip, { count: 1, windowStart: now });
+        return true;
+    }
+    if (entry.count >= maxRequests) return false;
+    entry.count++;
+    analyticsRateLimit.set(ip, entry);
+    return true;
+}
+
 // v127: Calculate identity key fingerprint
 const crypto = require('crypto');
 function calculateKeyFingerprint(identityKey) {
@@ -315,7 +410,21 @@ function loadItemsFromDatabase() {
            .then(items => {
                console.log(`Loaded ${items.length} feed items from MongoDB`);
                global.allFeedItems = items;
-               
+
+               // One-time backfill of updatedAt for existing items
+               const itemsWithoutUpdatedAt = items.filter(item => !item.updatedAt);
+               if (itemsWithoutUpdatedAt.length > 0) {
+                   console.log(`Delta sync: Backfilling updatedAt for ${itemsWithoutUpdatedAt.length} existing items`);
+                   FeedItem.updateMany(
+                       { updatedAt: null },
+                       { $set: { updatedAt: new Date('2026-01-01T00:00:00Z') } }
+                   ).then(result => {
+                       console.log(`Delta sync: Backfilled updatedAt for ${result.modifiedCount} items`);
+                   }).catch(err => {
+                       console.error(`Delta sync: Backfill error: ${err}`);
+                   });
+               }
+
                // Rebuild global.mediaContent from stored binary data
                let restoredImageCount = 0;
                let restoredVideoCount = 0;
@@ -488,6 +597,31 @@ app.get('/debug/duplicates', validateApiKey, (req, res) => {
 });
 
 // Test endpoint for comments
+// GET /active-users?since=60
+// Returns players seen within the last `since` seconds (default 60, max 3600).
+// Response: { activeUsers: [{ username, deviceName, lastSeen }], count, sinceSeconds }
+app.get('/active-users', validateApiKey, (req, res) => {
+    const sinceSeconds = Math.min(parseInt(req.query.since) || 60, 3600);
+    const cutoff = new Date(Date.now() - sinceSeconds * 1000);
+
+    const active = [];
+    for (const [, info] of activeUsers.entries()) {
+        if (info.lastSeen >= cutoff) {
+            active.push({
+                username:   info.username,
+                deviceName: info.deviceName,
+                lastSeen:   info.lastSeen.toISOString()
+            });
+        }
+    }
+
+    // Sort most-recently-seen first
+    active.sort((a, b) => new Date(b.lastSeen) - new Date(a.lastSeen));
+
+    console.log(`DEBUG-ACTIVE-USERS: ${active.length} users active in last ${sinceSeconds}s`);
+    res.json({ activeUsers: active, count: active.length, sinceSeconds });
+});
+
 app.get('/debug/comments/:feedItemId', validateApiKey, (req, res) => {
    const feedItemId = req.params.feedItemId;
    
@@ -533,7 +667,22 @@ mongoose.connect(mongoUri, {
  useUnifiedTopology: true
 }).then(() => {
  console.log('Connected to MongoDB database');
- 
+
+ // Seed active users map from MongoDB (so recent users survive restarts)
+ const seedCutoff = new Date(Date.now() - 60 * 1000); // last 60s
+ ActiveUser.find({ lastSeen: { $gte: seedCutoff } }).then(docs => {
+     docs.forEach(doc => {
+         activeUsers.set(doc.playerId, {
+             username: doc.username,
+             deviceName: doc.deviceName,
+             lastSeen: doc.lastSeen
+         });
+     });
+     console.log(`Active users: seeded ${docs.length} recent entries from MongoDB`);
+ }).catch(err => {
+     console.error(`Active users: failed to seed from MongoDB: ${err}`);
+ });
+
  // Load initial items AND rebuild media content
  return loadItemsFromDatabase();
 }).then(items => {
@@ -1660,13 +1809,19 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
                 console.log(`DEBUG-KEY-VERSION: Old fingerprint: ${existingBundle.identityKeyFingerprint}, New: ${newFingerprint}`);
 
                 // Queue notifications for senders with undelivered messages
-                await queueKeyChangeNotifications(
-                    username,
-                    oldKeyVersion,
-                    newKeyVersion,
-                    existingBundle.identityKeyFingerprint,
-                    newFingerprint
-                );
+                // v128: Wrap in try-catch so notification failures don't block key upload
+                try {
+                    await queueKeyChangeNotifications(
+                        username,
+                        oldKeyVersion,
+                        newKeyVersion,
+                        existingBundle.identityKeyFingerprint,
+                        newFingerprint
+                    );
+                } catch (notifError) {
+                    console.error('DEBUG-KEY-VERSION: Notification queueing failed (non-fatal):', notifError.message);
+                    // Continue with key upload -- notifications are secondary
+                }
             } else {
                 newKeyVersion = oldKeyVersion;  // Same key, same version
                 console.log(`DEBUG-KEY-VERSION: Keys unchanged for ${username}, version stays at ${newKeyVersion}`);
@@ -2307,6 +2462,9 @@ app.post('/feed', validateApiKey, (req, res) => {
                         processedItem.timestamp = new Date();
                     }
                     
+                    // Delta sync - set updatedAt to server time on publish
+                    processedItem.updatedAt = new Date();
+
                     // ADD THIS: Preserve isRepost property
                     if (feedItem.isRepost) {
                         processedItem.isRepost = true;
@@ -2324,6 +2482,16 @@ app.post('/feed', validateApiKey, (req, res) => {
                         processedItem.chapterNumber = feedItem.chapterNumber;
                         console.log(`DEBUG-THEBOOK: Publishing item with chapterNumber=${feedItem.chapterNumber}`);
                     }
+
+                    // AI Question fields
+                    if (feedItem.isAIQuestion) {
+                        processedItem.isAIQuestion = true;
+                        console.log(`DEBUG-AIQUESTION: Publishing item with isAIQuestion=true`);
+                    }
+                    if (feedItem.aiQuestionText) {
+                        processedItem.aiQuestionText = feedItem.aiQuestionText;
+                        console.log(`DEBUG-AIQUESTION: Publishing item with aiQuestionText`);
+                    }
                 } catch (error) {
                     console.error("Error processing item:", error);
                     processedItem = {...feedItem};
@@ -2334,7 +2502,18 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.feedItemID = (feedItemIdCounter++).toString();
                     console.log(`Assigned new feedItemID: ${processedItem.feedItemID}`);
                 }
-                
+
+                // UUID validation: ensure id is a valid RFC 4122 UUID.
+                // Items created via curl with a short/numeric/missing id generate
+                // different random UUIDs on every client parse, causing permanent duplicates.
+                // See FeedItemSystem_v9.md -- FeedItem Identity section.
+                const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                if (!processedItem.id || !uuidRegex.test(processedItem.id)) {
+                    const assignedId = uuidv4();
+                    console.log(`WARN-IDENTITY: Item "${processedItem.title}" had invalid/missing id "${processedItem.id}" -- assigned new UUID: ${assignedId}`);
+                    processedItem.id = assignedId;
+                }
+
                 // CRITICAL FIX: Ensure parentId is correctly preserved
                 if (feedItem.parentId) {
                     // Always store parentId as received without modification
@@ -2345,7 +2524,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // FIXED: Look up parent by id instead of feedItemID
                     FeedItem.findOneAndUpdate(
                         { id: String(feedItem.parentId) },  // Changed from feedItemID to id
-                        { $inc: { commentCount: 1 } },
+                        { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
                         { new: true }
                     ).then(updatedParent => {
                         if (updatedParent) {
@@ -2376,19 +2555,44 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 global.allFeedItems[parentIndex].commentCount = 0;
                             }
                             global.allFeedItems[parentIndex].commentCount += 1;
+                            global.allFeedItems[parentIndex].updatedAt = new Date();
                             console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory only with count: ${global.allFeedItems[parentIndex].commentCount}`);
                         }
                     });
                 }
                 
-                // Save to MongoDB and propagate to memory
-                FeedItem.findOneAndUpdate(
-                    { id: processedItem.id },
-                    processedItem,
-                    { upsert: true, new: true }
-                ).then(savedItem => {
-                    console.log(`Item saved to MongoDB: ${savedItem.id} with feedItemID: ${savedItem.feedItemID}`);
-                    
+                // v4.6: Check for ID collision before saving -- archive existing item if found
+                FeedItem.findOne({ id: processedItem.id }).then(existingItem => {
+                    if (existingItem) {
+                        console.log(`WARNING-COLLISION: Item ${processedItem.id} already exists! Archiving previous version. Old title: "${existingItem.title}", New title: "${processedItem.title}"`);
+                        return new FeedItemHistory({
+                            feedItemId: existingItem.id,
+                            operation: 'overwrite',
+                            previousDocument: existingItem.toObject(),
+                            changedBy: processedItem.author || 'unknown',
+                            reason: 'Publish collision -- new item had same UUID as existing item'
+                        }).save();
+                    }
+                }).catch(err => {
+                    console.error(`WARNING-COLLISION: History archive failed: ${err.message}`);
+                }).finally(() => {
+                    // v193: Author guard -- if item already exists, only the original author may overwrite it.
+                    // This prevents UUID-inherited posts from corrupting existing content.
+                    FeedItem.findOne({ id: processedItem.id, isDeleted: false }).then(guardItem => {
+                        if (guardItem && guardItem.author &&
+                            guardItem.author.toLowerCase() !== (processedItem.author || '').toLowerCase()) {
+                            console.log(`SECURITY: Rejected overwrite of ${processedItem.id} by ${processedItem.author} (owner: ${guardItem.author})`);
+                            return res.status(403).json({ error: 'Not authorized to overwrite this item' });
+                        }
+
+                    // Save to MongoDB and propagate to memory
+                    return FeedItem.findOneAndUpdate(
+                        { id: processedItem.id },
+                        processedItem,
+                        { upsert: true, new: true }
+                    ).then(savedItem => {
+                        console.log(`Item saved to MongoDB: ${savedItem.id} with feedItemID: ${savedItem.feedItemID}`);
+
                     // Add to global feed items if not already there
                     const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
                     if (!alreadyInGlobal) {
@@ -2402,7 +2606,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                             console.log(`Updated existing item in global feed items pool`);
                         }
                     }
-                    
+
                     // Add to session feed items if not already there
                     const alreadyInSession = gameSessions[sessionId].feedItems.some(item => item.id === processedItem.id);
                     if (!alreadyInSession) {
@@ -2416,21 +2620,21 @@ app.post('/feed', validateApiKey, (req, res) => {
                             console.log(`Updated existing item in session ${sessionId}`);
                         }
                     }
-                    
+
                     // CRITICAL FIX: Convert encryptedData Buffer to base64 for JSON transmission
                     const itemForTransmission = { ...processedItem };
                     if (itemForTransmission.encryptedData && Buffer.isBuffer(itemForTransmission.encryptedData)) {
                         itemForTransmission.encryptedData = itemForTransmission.encryptedData.toString('base64');
                         console.log(`DEBUG-ENCRYPTION-SERVER: Converting encryptedData to base64 for transmission`);
                     }
-                    
+
                     // Also create a message to notify all users
                     const messageContent = `FEED_ITEM:${JSON.stringify(itemForTransmission)}`;
-                    
+
                     // Add to all active sessions for propagation
                     Object.keys(gameSessions).forEach(sessId => {
                         const session = gameSessions[sessId];
-                        
+
                         // Create message object for each session
                         const message = {
                             id: uuidv4(),
@@ -2442,20 +2646,20 @@ app.post('/feed', validateApiKey, (req, res) => {
                             timestamp: new Date().getTime(),
                             isSystemMessage: false
                         };
-                        
+
                         // Initialize messages array if needed
                         if (!session.messages) {
                             session.messages = [];
                         }
-                        
+
                         // Add message to session
                         session.messages.push(message);
-                        
+
                         // Add feed item to session's feed items
                         if (!session.feedItems) {
                             session.feedItems = [];
                         }
-                        
+
                         // Only add if not already present (by ID)
                         const alreadyInTargetSession = session.feedItems.some(item => item.id === processedItem.id);
                         if (!alreadyInTargetSession) {
@@ -2463,7 +2667,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                             console.log(`Propagated feed item to session: ${sessId}`);
                         }
                     });
-                    
+
                     console.log(`Feed item ${processedItem.id} published to all sessions`);
                     res.json({
                         success: true,
@@ -2472,7 +2676,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                     });
                 }).catch(err => {
                     console.error(`Error saving to MongoDB: ${err}`);
-                    
+
                     // Fallback to memory-only if DB fails
                     // Add to global feed items if not already there
                     const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
@@ -2480,20 +2684,25 @@ app.post('/feed', validateApiKey, (req, res) => {
                         global.allFeedItems.push(processedItem);
                         console.log(`Added item to global feed items pool (DB fallback)`);
                     }
-                    
+
                     // Add to session feed items if not already there
                     const alreadyInSession = gameSessions[sessionId].feedItems.some(item => item.id === processedItem.id);
                     if (!alreadyInSession) {
                         gameSessions[sessionId].feedItems.push(processedItem);
                         console.log(`Added item to session ${sessionId} feed items (DB fallback)`);
                     }
-                    
+
                     res.json({
                         success: true,
                         feedItemId: processedItem.id,
                         feedItemID: processedItem.feedItemID // Include the numeric ID in response
                     });
                 });
+                    }).catch(err => {
+                        console.error(`Error in authorship check: ${err}`);
+                        res.status(500).json({ error: 'Server error during publish' });
+                    });
+                }); // v4.6: closes .finally() from collision check
             } else {
                 res.status(400).json({ error: 'Missing feed item data' });
             }
@@ -2544,13 +2753,28 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.content = '[Encrypted Message]';
                 }
                 
-                // Save to MongoDB
-                FeedItem.findOneAndUpdate(
-                    { id: processedItem.id },
-                    processedItem,
-                    { upsert: true, new: true }
-                ).then(savedItem => {
-                    console.log(`DEBUG-DM-MULTI-SERVER: âœ… Multi-recipient message saved: ${savedItem.id}`);
+                // v4.6: Check for ID collision before DM save
+                FeedItem.findOne({ id: processedItem.id }).then(existingDM => {
+                    if (existingDM) {
+                        console.log(`WARNING-COLLISION: DM item ${processedItem.id} already exists! Archiving.`);
+                        return new FeedItemHistory({
+                            feedItemId: existingDM.id,
+                            operation: 'overwrite',
+                            previousDocument: existingDM.toObject(),
+                            changedBy: processedItem.author || 'unknown',
+                            reason: 'DM publish collision'
+                        }).save();
+                    }
+                }).catch(err => {
+                    console.error(`WARNING-COLLISION: DM history archive failed: ${err.message}`);
+                }).finally(() => {
+                    // Save to MongoDB
+                    FeedItem.findOneAndUpdate(
+                        { id: processedItem.id },
+                        processedItem,
+                        { upsert: true, new: true }
+                    ).then(savedItem => {
+                        console.log(`DEBUG-DM-MULTI-SERVER: Multi-recipient message saved: ${savedItem.id}`);
                     
                     // Add to global feed
                     const alreadyInGlobal = global.allFeedItems.some(item => item.id === processedItem.id);
@@ -2578,11 +2802,12 @@ app.post('/feed', validateApiKey, (req, res) => {
                     console.error(`DEBUG-DM-MULTI-SERVER: Error saving: ${err}`);
                     res.status(500).json({ error: 'Database error' });
                 });
+                }); // v4.6: closes .finally() from DM collision check
             } else {
                 res.status(400).json({ error: 'Missing feed item data' });
             }
             break;
-                    
+
         case 'getComments':
             // Get comments for a specific feed item
             if (feedItemId) {
@@ -2708,6 +2933,75 @@ app.post('/feed', validateApiKey, (req, res) => {
             }
             break;
             
+        case 'databaseInteract':
+            // Atomic update of databaseData for any database FeedItem type.
+            if (feedItemId && req.body.databaseType && req.body.interaction) {
+                const dbType = req.body.databaseType;
+                const userId = req.body.userId || 'anonymous';
+                const interaction = req.body.interaction;
+
+                console.log(`DEBUG-DBITEM-SERVER: databaseInteract type=${dbType} item=${feedItemId} user=${userId}`);
+
+                const findQuery = {
+                    $or: [
+                        { id: String(feedItemId) },
+                        { feedItemID: String(feedItemId) }
+                    ]
+                };
+
+                FeedItem.findOne(findQuery).then(existingItem => {
+                    if (!existingItem) {
+                        return res.status(404).json({ error: 'Item not found' });
+                    }
+
+                    let meta = existingItem.metadata || {};
+                    let databaseData = meta.databaseData || {};
+
+                    if (dbType === 'poll') {
+                        const optionIndex = interaction.optionIndex;
+                        if (typeof optionIndex !== 'number') {
+                            return res.status(400).json({ error: 'poll requires optionIndex' });
+                        }
+                        let voteCounts = databaseData.voteCounts || [];
+                        const schema = meta.databaseSchema || {};
+                        const numOptions = (schema.options || []).length;
+                        while (voteCounts.length < numOptions) voteCounts.push(0);
+                        if (optionIndex < 0 || optionIndex >= numOptions) {
+                            return res.status(400).json({ error: 'optionIndex out of range' });
+                        }
+                        voteCounts[optionIndex] = (voteCounts[optionIndex] || 0) + 1;
+                        databaseData.voteCounts = voteCounts;
+                        databaseData.totalVotes = voteCounts.reduce((a, b) => a + b, 0);
+                        console.log(`DEBUG-DBITEM-SERVER: Poll vote recorded option=${optionIndex} totals=${JSON.stringify(voteCounts)}`);
+                    } else {
+                        console.log(`DEBUG-DBITEM-SERVER: Unknown databaseType '${dbType}' -- storing raw interaction`);
+                        databaseData.lastInteraction = { userId, interaction, timestamp: new Date() };
+                    }
+
+                    meta.databaseData = databaseData;
+                    existingItem.metadata = meta;
+                    existingItem.markModified('metadata');
+                    existingItem.updatedAt = new Date();
+
+                    return existingItem.save().then(saved => {
+                        const globalIndex = global.allFeedItems.findIndex(item =>
+                            String(item.id) === String(feedItemId)
+                        );
+                        if (globalIndex !== -1) {
+                            global.allFeedItems[globalIndex].metadata = meta;
+                        }
+                        console.log(`DEBUG-DBITEM-SERVER: databaseData saved to MongoDB`);
+                        res.json({ success: true, databaseData });
+                    });
+                }).catch(err => {
+                    console.error(`DEBUG-DBITEM-SERVER: Error: ${err}`);
+                    res.status(500).json({ error: 'Database error' });
+                });
+            } else {
+                res.status(400).json({ error: 'Missing feedItemId, databaseType, or interaction' });
+            }
+            break;
+
         case 'updateVoteCount':
             if (feedItemId && feedItem) {
                 console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvals: ${feedItem.approvalCount}, disapprovals: ${feedItem.disapprovalCount}`);
@@ -2755,10 +3049,151 @@ app.post('/feed', validateApiKey, (req, res) => {
 
         // Find the 'get' case in the switch statement of the /feed endpoint
         case 'get':
-            console.log("DEBUG-SYNC-SERVER: Handling 'get' feed request");
-            
-            // Try to get items from MongoDB first
+            // Active Users: record this player's presence on every sync
+            if (req.body.playerId) {
+                const _pid = req.body.playerId;
+                const _now = new Date();
+                activeUsers.set(_pid, {
+                    username:   req.body.username   || 'Anonymous',
+                    deviceName: req.body.deviceName || null,
+                    lastSeen:   _now
+                });
+                // Debounced MongoDB write: at most once per 30 seconds per player
+                const _lastPersist = activeUserLastPersisted.get(_pid);
+                if (!_lastPersist || (_now - _lastPersist) > 30000) {
+                    activeUserLastPersisted.set(_pid, _now);
+                    ActiveUser.findOneAndUpdate(
+                        { playerId: _pid },
+                        { playerId: _pid,
+                          username:   req.body.username   || 'Anonymous',
+                          deviceName: req.body.deviceName || null,
+                          lastSeen:   _now },
+                        { upsert: true, new: true }
+                    ).catch(err => {
+                        console.error(`Active users: MongoDB write error for ${_pid}: ${err}`);
+                    });
+                }
+            }
+
+            // Tombstone support -- extract here so both delta and full sync can use it
+            const includeTombstones = req.body.includeTombstones === true;
+            const sinceTombstoneTs = req.body.sinceTombstoneTimestamp;
+
+            // Delta sync support
+            const sinceTimestamp = req.body.sinceTimestamp;
+
+            if (sinceTimestamp) {
+                // DELTA SYNC: Return only items modified since the given timestamp
+                const sinceDate = new Date(sinceTimestamp);
+                console.log(`DEBUG-SYNC-SERVER: Delta sync request - items since ${sinceDate.toISOString()}`);
+
+                // Fix for Server side deletes
+                FeedItem.find({
+                    $or: [
+                        { updatedAt: { $gt: sinceDate } },
+                        { updatedAt: null, timestamp: { $gt: sinceDate } }
+                    ]
+                })
+                .select('-attributedContentData -imageData -videoData -audioData')
+                .then(items => {
+                    console.log(`DEBUG-SYNC-SERVER: Delta sync returning ${items.length} changed items (since ${sinceDate.toISOString()})`);
+
+                    const itemsForTransmission = items.map(item => {
+                        const itemObj = item.toObject();
+                        if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
+                            itemObj.encryptedData = itemObj.encryptedData.toString('base64');
+                        }
+                        return itemObj;
+                    });
+
+                    // 2026-04-24: Include tombstones in delta response if client requested them.
+                    // This covers items deleted BEFORE the client's sinceTimestamp that still
+                    // survive in the client's disk cache from a previous session.
+                    if (includeTombstones) {
+                        const tombstoneQuery = { isDeleted: true };
+                        if (sinceTombstoneTs) {
+                            const sinceTs = new Date(sinceTombstoneTs);
+                            if (!isNaN(sinceTs.getTime())) {
+                                tombstoneQuery.updatedAt = { $gt: sinceTs };
+                            }
+                        }
+                        FeedItem.find(tombstoneQuery)
+                            .select('id updatedAt')
+                            .then(tombstones => {
+                                const tombstoneList = tombstones.map(t => ({
+                                    id: t.id,
+                                    updatedAt: t.updatedAt
+                                }));
+                                console.log(`DEBUG-SYNC-SERVER: Delta returning ${itemsForTransmission.length} items + ${tombstoneList.length} tombstones`);
+                                res.json({
+                                    success: true,
+                                    isDelta: true,
+                                    sinceTimestamp: sinceTimestamp,
+                                    serverTimestamp: new Date().toISOString(),
+                                    feedItems: itemsForTransmission,
+                                    tombstones: tombstoneList
+                                });
+                            })
+                            .catch(tombErr => {
+                                console.error(`DEBUG-SYNC-SERVER: Delta tombstone query failed: ${tombErr}`);
+                                res.json({
+                                    success: true,
+                                    isDelta: true,
+                                    sinceTimestamp: sinceTimestamp,
+                                    serverTimestamp: new Date().toISOString(),
+                                    feedItems: itemsForTransmission
+                                });
+                            });
+                    } else {
+                        res.json({
+                            success: true,
+                            isDelta: true,
+                            sinceTimestamp: sinceTimestamp,
+                            serverTimestamp: new Date().toISOString(),
+                            feedItems: itemsForTransmission
+                        });
+                    }
+                })
+                .catch(err => {
+                    console.error(`Delta sync error: ${err}`);
+                    // Fall back to full sync on error
+                    FeedItem.find({ isDeleted: false })
+                        .select('-attributedContentData -imageData -videoData -audioData')
+                        .then(allItems => {
+                            const itemsForTransmission = allItems.map(item => {
+                                const itemObj = item.toObject();
+                                if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
+                                    itemObj.encryptedData = itemObj.encryptedData.toString('base64');
+                                }
+                                return itemObj;
+                            });
+                            res.json({
+                                success: true,
+                                isDelta: false,
+                                serverTimestamp: new Date().toISOString(),
+                                feedItems: itemsForTransmission
+                            });
+                        })
+                        .catch(fallbackErr => {
+                            console.error(`Full sync fallback also failed: ${fallbackErr}`);
+                            res.json({ success: true, feedItems: [] });
+                        });
+                });
+                break;
+            }
+
+            console.log("DEBUG-SYNC-SERVER: Handling full 'get' feed request (no sinceTimestamp)");
+
+            // FULL SYNC (original behavior, backward compatible)
             // CRITICAL FIX: Exclude large binary fields to prevent OOM on Android
+            //
+            // 2026-04-24 ADDITION: Optionally include `tombstones` (array of {id, updatedAt} for
+            // soft-deleted records) when client sends includeTombstones: true. This lets cold-start
+            // clients learn about deletions that happened while they were offline. Without this,
+            // a client whose disk cache contains item X, then comes back after X was deleted, would
+            // never learn that X is gone -- full sync only returns alive items, and merge logic
+            // never removes items just because they're absent from the response.
+            //
             FeedItem.find({ isDeleted: false })
                 .select('-attributedContentData -imageData -videoData -audioData')
                 .then(items => {
@@ -2787,11 +3222,52 @@ app.post('/feed', validateApiKey, (req, res) => {
                         return itemObj;
                     });
                     
-                    // Return the transformed items
-                    res.json({
-                        success: true,
-                        feedItems: itemsForTransmission
-                    });
+                    // Build response. If client requested tombstones, query for soft-deleted records
+                    // and attach them. Otherwise omit the field entirely (backward compatibility).
+                    if (includeTombstones) {
+                        const tombstoneQuery = { isDeleted: true };
+                        if (sinceTombstoneTs) {
+                            const sinceDate = new Date(sinceTombstoneTs);
+                            if (!isNaN(sinceDate.getTime())) {
+                                tombstoneQuery.updatedAt = { $gt: sinceDate };
+                            }
+                        }
+                        FeedItem.find(tombstoneQuery)
+                            .select('id updatedAt')
+                            .then(tombstones => {
+                                const tombstoneList = tombstones.map(t => ({
+                                    id: t.id,
+                                    updatedAt: t.updatedAt
+                                }));
+                                console.log(`DEBUG-SYNC-SERVER: Returning ${itemsForTransmission.length} alive items + ${tombstoneList.length} tombstones (sinceTombstoneTs=${sinceTombstoneTs || 'all-time'})`);
+                                res.json({
+                                    success: true,
+                                    isDelta: false,
+                                    serverTimestamp: new Date().toISOString(),
+                                    feedItems: itemsForTransmission,
+                                    tombstones: tombstoneList
+                                });
+                            })
+                            .catch(tombErr => {
+                                // If tombstone query fails, still return the alive items.
+                                // Client treats missing tombstones field as empty array (safe).
+                                console.error(`DEBUG-SYNC-SERVER: Tombstone query failed: ${tombErr}. Returning alive items only.`);
+                                res.json({
+                                    success: true,
+                                    isDelta: false,
+                                    serverTimestamp: new Date().toISOString(),
+                                    feedItems: itemsForTransmission
+                                });
+                            });
+                    } else {
+                        // Backward-compatible: no tombstones requested, original response shape
+                        res.json({
+                            success: true,
+                            isDelta: false,
+                            serverTimestamp: new Date().toISOString(),
+                            feedItems: itemsForTransmission
+                        });
+                    }
                 })
                 .catch(err => {
                     console.error(`Error getting items from MongoDB: ${err}`);
@@ -2821,6 +3297,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                     
                     res.json({
                         success: true,
+                        isDelta: false,
+                        serverTimestamp: new Date().toISOString(),
                         feedItems: uniqueItems
                     });
                 });
@@ -2830,7 +3308,35 @@ app.post('/feed', validateApiKey, (req, res) => {
             // This handles updating an existing feed item (edit functionality)
             if (feedItem && feedItem.id) {
                 console.log(`Updating feed item: ${feedItem.title} [${feedItem.id}]`);
-                
+
+                // v133: Pre-update archive -- fire-and-forget snapshot into FeedItemHistory before any overwrite.
+                // Uses the same FeedItemHistory schema and pattern as the publish collision archive.
+                FeedItem.findOne({ id: feedItem.id, isDeleted: false }).then(storedForUpdate => {
+                    if (!storedForUpdate) return;
+                    new FeedItemHistory({
+                        feedItemId: storedForUpdate.id,
+                        operation: 'pre-update-snapshot',
+                        previousDocument: storedForUpdate.toObject ? storedForUpdate.toObject() : storedForUpdate,
+                        changedBy: feedItem.author || 'unknown',
+                        reason: 'v133 pre-update snapshot before overwrite'
+                    }).save()
+                    .then(() => console.log(`DEBUG-UPDATE-HISTORY: Archived "${storedForUpdate.title}" [${storedForUpdate.id}] before update`))
+                    .catch(e => console.error(`DEBUG-UPDATE-HISTORY: Archive failed (non-fatal): ${e.message}`));
+                }).catch(e => console.error(`DEBUG-UPDATE-GUARD: Lookup error: ${e.message}`));
+
+                // v133: Author guard -- uses global.allFeedItems (in-memory, always current)
+                // to avoid async restructure of this handler. Rejects if stored author differs
+                // from the author field in the incoming update request.
+                const guardItemUpdate = global.allFeedItems.find(i => i.id === feedItem.id);
+                if (guardItemUpdate &&
+                    guardItemUpdate.author &&
+                    feedItem.author &&
+                    guardItemUpdate.author.toLowerCase() !== feedItem.author.toLowerCase()) {
+                    console.log(`SECURITY-UPDATE: Rejected update of "${guardItemUpdate.title}" [${guardItemUpdate.id}] by "${feedItem.author}" -- owner is "${guardItemUpdate.author}"`);
+                    res.status(403).json({ error: 'Not authorized to update this item' });
+                    break;
+                }
+
                 // Process media content if present
                 let processedItem = processMediaContent(feedItem);
                 
@@ -2856,6 +3362,41 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItem.chapterNumber !== undefined) {
                     processedItem.chapterNumber = feedItem.chapterNumber;
                     console.log(`DEBUG-THEBOOK: Updating item with chapterNumber=${feedItem.chapterNumber}`);
+                }
+
+                // AI Question fields during updates
+                if (feedItem.isAIQuestion !== undefined) {
+                    processedItem.isAIQuestion = feedItem.isAIQuestion;
+                    console.log(`DEBUG-AIQUESTION: Updating item with isAIQuestion=${feedItem.isAIQuestion}`);
+                }
+                if (feedItem.aiQuestionText !== undefined) {
+                    processedItem.aiQuestionText = feedItem.aiQuestionText;
+                    console.log(`DEBUG-AIQUESTION: Updating item with aiQuestionText`);
+                }
+
+                // Database FeedItem fields during updates
+                if (feedItem.isDatabaseItem !== undefined) {
+                    processedItem.isDatabaseItem = feedItem.isDatabaseItem;
+                    console.log(`DEBUG-DBITEM: Updating item with isDatabaseItem=${feedItem.isDatabaseItem}`);
+                }
+                if (feedItem.databaseType !== undefined) {
+                    processedItem.databaseType = feedItem.databaseType;
+                    console.log(`DEBUG-DBITEM: Updating item with databaseType=${feedItem.databaseType}`);
+                }
+
+                // Fundraising fields during updates
+                if (feedItem.isFundraising !== undefined) {
+                    processedItem.isFundraising = feedItem.isFundraising;
+                    console.log(`DEBUG-FUNDRAISE: Updating item with isFundraising=${feedItem.isFundraising}`);
+                }
+                if (feedItem.actBlueUrl !== undefined) {
+                    processedItem.actBlueUrl = feedItem.actBlueUrl;
+                }
+                if (feedItem.fundraisingGoal !== undefined) {
+                    processedItem.fundraisingGoal = feedItem.fundraisingGoal;
+                }
+                if (feedItem.fundraisingDescription !== undefined) {
+                    processedItem.fundraisingDescription = feedItem.fundraisingDescription;
                 }
 
                 // CRITICAL: Explicitly preserve encryption fields during updates
@@ -2911,7 +3452,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.timestamp = new Date();
                     console.log(`Forcing new timestamp for edited item: ${processedItem.id}`);
                 }
-                
+
+                // Delta sync - update modification timestamp
+                processedItem.updatedAt = new Date();
+
                 // Update in MongoDB first
                 FeedItem.findOneAndUpdate(
                     { id: processedItem.id },
@@ -3089,19 +3633,22 @@ app.post('/feed', validateApiKey, (req, res) => {
         case 'delete':
             // Delete logic
             if (feedItem && feedItem.id) {
-                console.log(`Deleting feed item: ${feedItem.id}`);
-                
+                // v136: Case-insensitive ID matching -- iOS sends uppercase, Android sends lowercase
+                const deleteId = feedItem.id.toLowerCase();
+                console.log(`Deleting feed item: ${feedItem.id} (normalized: ${deleteId})`);
+
                 // Mark as deleted in MongoDB (soft delete)
+                // Case-insensitive regex match handles both uppercase and lowercase IDs
                 FeedItem.findOneAndUpdate(
-                    { id: feedItem.id },
-                    { isDeleted: true },
+                    { id: { $regex: new RegExp(`^${deleteId}$`, 'i') } },
+                    { isDeleted: true, updatedAt: new Date() },
                     { new: true }
                 ).then(deletedItem => {
                     if (deletedItem) {
                         console.log(`Item marked as deleted in MongoDB: ${deletedItem.id}`);
-                        
-                        // Remove from global array
-                        const globalIndex = global.allFeedItems.findIndex(item => item.id === feedItem.id);
+
+                        // Remove from global array (case-insensitive)
+                        const globalIndex = global.allFeedItems.findIndex(item => item.id.toLowerCase() === deleteId);
                         if (globalIndex !== -1) {
                             global.allFeedItems.splice(globalIndex, 1);
                             console.log(`Removed item from global feed items`);
@@ -3112,15 +3659,22 @@ app.post('/feed', validateApiKey, (req, res) => {
                             const session = gameSessions[sessId];
                             
                             if (session.feedItems) {
-                                const index = session.feedItems.findIndex(item => item.id === feedItem.id);
+                                const index = session.feedItems.findIndex(item => item.id.toLowerCase() === deleteId);
                                 if (index !== -1) {
                                     session.feedItems.splice(index, 1);
                                     console.log(`Removed item from session ${sessId}`);
                                 }
                             }
                             
-                            // Add delete notification to each session
-                            const deleteMessage = {
+                            // Remove original FEED_ITEM broadcast message for this item
+                                if (session.messages) {
+                                    session.messages = session.messages.filter(m =>
+                                        !(m.content && m.content.startsWith('FEED_ITEM:') && m.content.toLowerCase().includes(`"id":"${deleteId}"`))
+                                    );
+                                }
+
+                                // Add delete notification to each session
+                                const deleteMessage = {
                                 id: uuidv4(),
                                 sessionId: sessId,
                                 senderId: playerId,
@@ -3165,6 +3719,13 @@ app.post('/feed', validateApiKey, (req, res) => {
                             if (index !== -1) {
                                 session.feedItems.splice(index, 1);
                             }
+                        }
+
+                        // Remove original FEED_ITEM broadcast message for this item
+                        if (session.messages) {
+                            session.messages = session.messages.filter(m =>
+                                !(m.content && m.content.startsWith('FEED_ITEM:') && m.content.includes(`"id":"${feedItem.id}"`))
+                            );
                         }
                     });
                     
@@ -3967,7 +4528,10 @@ app.get('/downloadEncryptedImage/:imageId/:username', validateApiKey, async (req
         }
 
         // Get user's specific encrypted AES key
-        const userEncryptedKey = encryptedImage.encryptedKeysPerRecipient[username];
+        // v129: Case-insensitive lookup -- keys stored lowercase from encryption
+        const lowerUsername = username.toLowerCase();
+        const userEncryptedKey = Object.entries(encryptedImage.encryptedKeysPerRecipient)
+            .find(([k]) => k.toLowerCase() === lowerUsername)?.[1];
 
         if (!userEncryptedKey) {
             console.log(`DEBUG-HYBRID-IMAGE: ❌ No key found for user: ${username}`);
@@ -4000,6 +4564,375 @@ app.get('/downloadEncryptedImage/:imageId/:username', validateApiKey, async (req
             error: 'Download failed',
             details: error.message
         });
+    }
+});
+
+
+// =============================================================================
+// MUX VIDEO LIVE STREAMING ENDPOINTS (Phase 1 - Feb 2026)
+// =============================================================================
+
+// Create a new Mux live stream
+app.post('/video/create-live-stream', validateApiKey, async (req, res) => {
+    console.log('DEBUG-MUX: Create live stream request received');
+    
+    try {
+        if (!muxClient) {
+            console.log('DEBUG-MUX: Mux client not initialized');
+            return res.status(500).json({
+                success: false,
+                error: 'Mux video service not configured'
+            });
+        }
+        
+        const { title, author } = req.body;
+        console.log(`DEBUG-MUX: Creating stream for title="${title}", author="${author}"`);
+        
+        // Create live stream via Mux API
+        // v131: Auto-generated English closed captions (Mux AI speech-to-text)
+        // Captions are embedded in HLS manifest -- AVPlayer/ExoPlayer render automatically
+        const liveStream = await muxClient.video.liveStreams.create({
+            playback_policy: ['public'],
+            new_asset_settings: {
+                playback_policy: ['public']
+            },
+            reduced_latency: true,
+            reconnect_window: 300,
+            test: false,
+            generated_subtitles: [{
+                name: "English CC (auto)",
+                language_code: "en"
+            }]
+        });
+        
+        console.log(`DEBUG-MUX: Live stream created with ID: ${liveStream.id}`);
+        console.log(`DEBUG-MUX: Playback ID: ${liveStream.playback_ids[0].id}`);
+        console.log(`DEBUG-MUX: Stream Key: ${liveStream.stream_key}`);
+        
+        // Store stream info
+        const streamInfo = {
+            muxStreamId: liveStream.id,
+            muxPlaybackId: liveStream.playback_ids[0].id,
+            streamKey: liveStream.stream_key,
+            rtmpUrl: 'rtmps://global-live.mux.com:443/app',
+            status: liveStream.status,
+            createdAt: new Date(),
+            title: title,
+            author: author
+        };
+        
+        global.muxStreams[liveStream.id] = streamInfo;
+        
+        res.json({
+            success: true,
+            stream: streamInfo
+        });
+        
+    } catch (error) {
+        console.error(`DEBUG-MUX: Create stream failed: ${error.message}`);
+        console.error(error.stack);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to create live stream',
+            details: error.message
+        });
+    }
+});
+
+// Get live stream status
+app.get('/video/stream-status/:streamId', validateApiKey, async (req, res) => {
+    console.log(`DEBUG-MUX: Stream status request for ${req.params.streamId}`);
+    
+    try {
+        if (!muxClient) {
+            return res.status(500).json({
+                success: false,
+                error: 'Mux video service not configured'
+            });
+        }
+        
+        const liveStream = await muxClient.video.liveStreams.retrieve(req.params.streamId);
+        
+        // v131: Include recent_asset_ids for VOD recording playback
+        res.json({
+            success: true,
+            status: liveStream.status,
+            streamId: liveStream.id,
+            playbackId: liveStream.playback_ids[0]?.id,
+            activeAssetId: liveStream.active_asset_id,
+            recentAssetIds: liveStream.recent_asset_ids || []
+        });
+        
+    } catch (error) {
+        console.error(`DEBUG-MUX: Status check failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get stream status',
+            details: error.message
+        });
+    }
+});
+
+// v131: Get VOD asset playback URL (for watching recordings of completed broadcasts)
+app.get('/video/asset-playback/:assetId', validateApiKey, async (req, res) => {
+    console.log(`DEBUG-MUX: Asset playback request for ${req.params.assetId}`);
+    
+    try {
+        if (!muxClient) {
+            return res.status(500).json({
+                success: false,
+                error: 'Mux video service not configured'
+            });
+        }
+        
+        const asset = await muxClient.video.assets.retrieve(req.params.assetId);
+        
+        const playbackId = asset.playback_ids?.[0]?.id;
+        if (!playbackId) {
+            return res.status(404).json({
+                success: false,
+                error: 'No playback ID found for this asset'
+            });
+        }
+        
+        res.json({
+            success: true,
+            assetId: asset.id,
+            playbackId: playbackId,
+            playbackUrl: `https://stream.mux.com/${playbackId}.m3u8`,
+            thumbnailUrl: `https://image.mux.com/${playbackId}/thumbnail.jpg`,
+            status: asset.status,
+            duration: asset.duration
+        });
+        
+    } catch (error) {
+        console.error(`DEBUG-MUX: Asset playback lookup failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get asset playback info',
+            details: error.message
+        });
+    }
+});
+
+// Update live stream status on feed item (called by iOS app when going live / ending stream)
+app.patch('/video/update-stream-status', validateApiKey, async (req, res) => {
+    const { muxStreamId, status } = req.body;
+    console.log(`DEBUG-MUX: Update stream status request: ${muxStreamId} -> ${status}`);
+
+    if (!muxStreamId || !status) {
+        return res.status(400).json({
+            success: false,
+            error: 'Missing muxStreamId or status'
+        });
+    }
+
+    try {
+        const FeedItem = mongoose.model('FeedItem');
+        const result = await FeedItem.findOneAndUpdate(
+            { muxStreamId: muxStreamId },
+            { liveStreamStatus: status },
+            { new: true }
+        );
+
+        if (!result) {
+            console.log(`DEBUG-MUX: No feed item found with muxStreamId ${muxStreamId}`);
+            return res.status(404).json({
+                success: false,
+                error: 'No feed item found with that muxStreamId'
+            });
+        }
+
+        console.log(`DEBUG-MUX: Updated liveStreamStatus to ${status} for feed item ${result.feedItemID}`);
+        res.json({
+            success: true,
+            feedItemID: result.feedItemID,
+            muxStreamId: muxStreamId,
+            liveStreamStatus: status
+        });
+
+    } catch (error) {
+        console.error(`DEBUG-MUX: Update stream status failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to update stream status',
+            details: error.message
+        });
+    }
+});
+
+// List all active streams
+app.get('/video/streams', validateApiKey, async (req, res) => {
+    console.log('DEBUG-MUX: List streams request');
+    
+    try {
+        if (!muxClient) {
+            return res.status(500).json({
+                success: false,
+                error: 'Mux video service not configured'
+            });
+        }
+        
+        const streams = await muxClient.video.liveStreams.list();
+        
+        res.json({
+            success: true,
+            streams: streams.data.map(s => ({
+                id: s.id,
+                status: s.status,
+                playbackId: s.playback_ids[0]?.id,
+                createdAt: s.created_at
+            }))
+        });
+        
+    } catch (error) {
+        console.error(`DEBUG-MUX: List streams failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to list streams',
+            details: error.message
+        });
+    }
+});
+
+// End a live stream
+app.post('/video/stream/:streamId/complete', validateApiKey, async (req, res) => {
+    console.log(`DEBUG-MUX: Complete stream request for ${req.params.streamId}`);
+    
+    try {
+        if (!muxClient) {
+            return res.status(500).json({
+                success: false,
+                error: 'Mux video service not configured'
+            });
+        }
+        
+        await muxClient.video.liveStreams.complete(req.params.streamId);
+        
+        res.json({
+            success: true,
+            message: 'Stream completed'
+        });
+        
+    } catch (error) {
+        console.error(`DEBUG-MUX: Complete stream failed: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to complete stream',
+            details: error.message
+        });
+    }
+});
+
+// v130: POST /analytics/plot-event -- anonymous, unauthenticated, rate-limited
+// Accepts: { orgId, questionNumber, questionText, section, state }
+// Increments yesCount or noCount in place. No userId stored.
+app.post('/analytics/plot-event', async (req, res) => {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    if (!checkAnalyticsRateLimit(ip)) {
+        return res.status(429).json({ error: 'Rate limit exceeded' });
+    }
+    const { orgId, questionNumber, questionText, section, state } = req.body || {};
+    if (!orgId || !questionNumber || !questionText || section == null || !state) {
+        return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (state !== 'yes' && state !== 'no') {
+        return res.status(400).json({ error: 'state must be yes or no' });
+    }
+    try {
+        const inc = state === 'yes' ? { yesCount: 1 } : { noCount: 1 };
+        await PlotAnalyticsSummary.findOneAndUpdate(
+            { orgId, questionNumber },
+            {
+                $inc: inc,
+                $set:  { updatedAt: new Date() },
+                $setOnInsert: { questionText, section }
+            },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true });
+    } catch (err) {
+        console.error('DEBUG-ANALYTICS: plot-event error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// v130: GET /analytics/dashboard/:orgId -- authenticated JSON data
+// Returns questions with > 0 total responses, sorted by yesPercent desc
+app.get('/analytics/dashboard/:orgId', validateApiKey, async (req, res) => {
+    const { orgId } = req.params;
+    try {
+        const rows = await PlotAnalyticsSummary.find({ orgId }).lean();
+        const filtered = rows
+            .map(r => {
+                const total = r.yesCount + r.noCount;
+                return { ...r, total, yesPercent: total > 0 ? Math.round((r.yesCount / total) * 100) : 0 };
+            })
+            .filter(r => r.total > 0)
+            .sort((a, b) => b.yesPercent - a.yesPercent);
+        res.json({ orgId, questions: filtered });
+    } catch (err) {
+        console.error('DEBUG-ANALYTICS: dashboard error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// v130: GET /analytics/dashboard-ui/:orgId -- unauthenticated HTML dashboard
+app.get('/analytics/dashboard-ui/:orgId', async (req, res) => {
+    const { orgId } = req.params;
+    try {
+        const rows = await PlotAnalyticsSummary.find({ orgId }).lean();
+        const questions = rows
+            .map(r => {
+                const total = r.yesCount + r.noCount;
+                return { ...r, total, yesPercent: total > 0 ? Math.round((r.yesCount / total) * 100) : 0 };
+            })
+            .filter(r => r.total > 0)
+            .sort((a, b) => b.yesPercent - a.yesPercent);
+
+        const totalResponses = questions.reduce((s, q) => s + q.total, 0);
+
+        const rows_html = questions.map(q => ''
+            + '<tr>'
+            + '<td style="padding:10px;color:#ccc">' + q.section + '</td>'
+            + '<td style="padding:10px;color:#fff">' + q.questionText + '</td>'
+            + '<td style="padding:10px;text-align:center">'
+            + '<div style="background:#333;border-radius:4px;height:20px;width:120px;display:inline-block;vertical-align:middle">'
+            + '<div style="background:#4CAF50;height:100%;width:' + q.yesPercent + '%;border-radius:4px"></div>'
+            + '</div>'
+            + '<span style="color:#4CAF50;margin-left:8px">' + q.yesPercent + '% yes</span>'
+            + '</td>'
+            + '<td style="padding:10px;color:#888;text-align:right">' + q.total + ' responses</td>'
+            + '</tr>').join('');
+
+        const html = '<!DOCTYPE html><html><head><title>' + orgId + ' -- dWorld Analytics</title>'
+            + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            + '<style>body{background:#1a1a2e;font-family:system-ui,sans-serif;color:#fff;margin:0;padding:20px}'
+            + 'h1{color:#4fc3f7}table{width:100%;border-collapse:collapse;margin-top:20px}'
+            + 'tr:nth-child(even){background:#12122a}tr:hover{background:#1e1e3a}'
+            + '.stat{display:inline-block;background:#12122a;border-radius:8px;padding:15px 25px;margin:10px;text-align:center}'
+            + '.stat-num{font-size:2em;color:#4fc3f7;font-weight:bold}.stat-label{color:#888;font-size:.9em}</style></head>'
+            + '<body>'
+            + '<h1>' + orgId + ' Community Dashboard</h1>'
+            + '<p style="color:#888">Anonymous aggregated responses</p>'
+            + '<div>'
+            + '<div class="stat"><div class="stat-num">' + questions.length + '</div><div class="stat-label">Questions tracked</div></div>'
+            + '<div class="stat"><div class="stat-num">' + totalResponses + '</div><div class="stat-label">Total responses</div></div>'
+            + '</div>'
+            + '<table><thead><tr>'
+            + '<th style="padding:10px;text-align:left;color:#4fc3f7;border-bottom:1px solid #333">Section</th>'
+            + '<th style="padding:10px;text-align:left;color:#4fc3f7;border-bottom:1px solid #333">Question</th>'
+            + '<th style="padding:10px;text-align:left;color:#4fc3f7;border-bottom:1px solid #333">Yes %</th>'
+            + '<th style="padding:10px;text-align:right;color:#4fc3f7;border-bottom:1px solid #333">Responses</th>'
+            + '</tr></thead><tbody>'
+            + (rows_html || '<tr><td colspan="4" style="padding:20px;text-align:center;color:#888">No responses recorded yet.</td></tr>')
+            + '</tbody></table>'
+            + '<p style="color:#444;margin-top:30px;font-size:.8em">Updated live - ' + new Date().toUTCString() + '</p>'
+            + '</body></html>';
+        res.type('html').send(html);
+    } catch (err) {
+        console.error('DEBUG-ANALYTICS: dashboard-ui error:', err.message);
+        res.status(500).send('<h1>Error loading dashboard</h1>');
     }
 });
 

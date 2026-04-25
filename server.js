@@ -1,4 +1,4 @@
-// Stranded Astronaut Server version 138
+// Stranded Astronaut Server version 139 -- Added isLibraryDocument to FeedItem schema
 // v138: Case-insensitive session.messages filter in delete handler --
 //   FEED_ITEM: broadcasts now correctly removed when deleter's platform
 //   differs from publisher's platform (iOS uppercase vs Android lowercase UUIDs)
@@ -131,6 +131,7 @@ const feedItemSchema = new mongoose.Schema({
    isRepost: { type: Boolean, default: false },
    isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
    chapterNumber: String,  // Chapter numbering for TheBook (e.g., "1.1", "2.3")
+   isLibraryDocument: { type: Boolean, default: false },  // Library document flag for DocumentLibrary
    isAIQuestion: { type: Boolean, default: false },  // AI Question feed item flag
    aiQuestionText: String,  // Pre-written question text for AI injection
    isDatabaseItem: { type: Boolean, default: false },  // Database FeedItem flag
