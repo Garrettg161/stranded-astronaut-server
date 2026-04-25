@@ -1,4 +1,4 @@
-// Stranded Astronaut Server version 139 -- Added isLibraryDocument to FeedItem schema
+// Stranded Astronaut Server version 140 -- isLibraryDocument: schema + publish/update preservation
 // v138: Case-insensitive session.messages filter in delete handler --
 //   FEED_ITEM: broadcasts now correctly removed when deleter's platform
 //   differs from publisher's platform (iOS uppercase vs Android lowercase UUIDs)
@@ -2478,6 +2478,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                         console.log(`DEBUG-THEBOOK: Publishing item with isTheBook=true`);
                     }
 
+                    // Preserve isLibraryDocument property (DocumentLibrary flag)
+                    if (feedItem.isLibraryDocument) {
+                        processedItem.isLibraryDocument = true;
+                    }
+
                     // ADD: Preserve chapterNumber property (for TheBook chapter numbering)
                     if (feedItem.chapterNumber) {
                         processedItem.chapterNumber = feedItem.chapterNumber;
@@ -3363,6 +3368,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItem.chapterNumber !== undefined) {
                     processedItem.chapterNumber = feedItem.chapterNumber;
                     console.log(`DEBUG-THEBOOK: Updating item with chapterNumber=${feedItem.chapterNumber}`);
+                }
+
+                // Preserve isLibraryDocument during updates (DocumentLibrary flag)
+                if (feedItem.isLibraryDocument !== undefined) {
+                    processedItem.isLibraryDocument = feedItem.isLibraryDocument;
                 }
 
                 // AI Question fields during updates
