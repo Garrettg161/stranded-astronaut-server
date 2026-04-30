@@ -3658,6 +3658,39 @@ app.post('/feed', validateApiKey, (req, res) => {
                     if (deletedItem) {
                         console.log(`Item marked as deleted in MongoDB: ${deletedItem.id}`);
 
+                        // v10A bugfix (2026-04-30): if the deleted item is a comment
+                        // (has parentId), decrement the parent's commentCount.
+                        // Without this, deleting a comment client-side leaves the
+                        // server-side count too high; on next refresh, badges show
+                        // a count higher than the actual comments. Mirrors the
+                        // existing $inc on comment publish at line 2533.
+                        if (deletedItem.parentId) {
+                            FeedItem.findOneAndUpdate(
+                                { id: String(deletedItem.parentId) },
+                                { $inc: { commentCount: -1 }, $set: { updatedAt: new Date() } },
+                                { new: true }
+                            ).then(updatedParent => {
+                                if (updatedParent) {
+                                    // Floor at 0 in case of any historical drift
+                                    if (updatedParent.commentCount < 0) {
+                                        FeedItem.findOneAndUpdate(
+                                            { id: String(deletedItem.parentId) },
+                                            { $set: { commentCount: 0 } }
+                                        ).exec();
+                                    }
+                                    console.log(`DEBUG-COMMENT-SERVER: Decremented parent commentCount to ${Math.max(0, updatedParent.commentCount)}`);
+                                    const parentIndex = global.allFeedItems.findIndex(item =>
+                                        String(item.id) === String(deletedItem.parentId)
+                                    );
+                                    if (parentIndex !== -1) {
+                                        global.allFeedItems[parentIndex].commentCount = Math.max(0, updatedParent.commentCount);
+                                    }
+                                }
+                            }).catch(err => {
+                                console.error(`DEBUG-COMMENT-SERVER: Error decrementing parent commentCount: ${err}`);
+                            });
+                        }
+
                         // Remove from global array (case-insensitive)
                         const globalIndex = global.allFeedItems.findIndex(item => item.id.toLowerCase() === deleteId);
                         if (globalIndex !== -1) {
