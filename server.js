@@ -1,4 +1,15 @@
-// Stranded Astronaut Server version 141
+// Stranded Astronaut Server version 142
+// v142: RC5-1 Bug 5 fix. updateVoteCount now uses atomic $inc with client-supplied
+//   approvalDelta/disapprovalDelta instead of $set with client-supplied absolute
+//   approvalCount/disapprovalCount. The absolute-count protocol was last-writer-wins:
+//   when N devices each saw stale local count=0 and voted up, each sent "set count=1"
+//   and the server landed at 1, losing N-1 votes. Mirrors the comment publish path
+//   (line ~2542): { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } }.
+//   Response now carries the post-$inc authoritative counts so clients can write
+//   through with truth instead of their pre-vote estimate. Wire-format change:
+//   feedItem now contains approvalDelta/disapprovalDelta instead of approvalCount/
+//   disapprovalCount; old clients sending the old shape will be ignored (NaN -> 0
+//   delta, vote silently dropped). Coordinated client rebuild required.
 // v141: RC5-1 Bug 2 fix. updateVoteCount now sets updatedAt: new Date() in the
 //   findOneAndUpdate payload so vote changes are visible to delta-sync queries
 //   (which filter on updatedAt > sinceDate). Mirrors the pattern used by every
@@ -3019,8 +3030,12 @@ app.post('/feed', validateApiKey, (req, res) => {
 
         case 'updateVoteCount':
             if (feedItemId && feedItem) {
-                console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvals: ${feedItem.approvalCount}, disapprovals: ${feedItem.disapprovalCount}`);
-                
+                // v142: atomic $inc on deltas (mirrors comment publish at line ~2542).
+                // Number(undefined) -> NaN -> || 0 silently drops malformed payloads.
+                const approvalDelta = Number(feedItem.approvalDelta) || 0;
+                const disapprovalDelta = Number(feedItem.disapprovalDelta) || 0;
+                console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvalDelta: ${approvalDelta}, disapprovalDelta: ${disapprovalDelta}`);
+
                 // Try to find by id first, then by feedItemID if not found
                 const findQuery = {
                     $or: [
@@ -3029,33 +3044,36 @@ app.post('/feed', validateApiKey, (req, res) => {
                     ]
                 };
 
-                // v141: bump updatedAt so delta-sync queries (updatedAt > sinceDate)
-                // see the change. Without this, other clients' auto-refresh never
-                // pulls vote updates -- only a full getFeedItems poll does.
                 const voteUpdatedAt = new Date();
                 FeedItem.findOneAndUpdate(
                     findQuery,
                     {
-                        approvalCount: feedItem.approvalCount,
-                        disapprovalCount: feedItem.disapprovalCount,
-                        updatedAt: voteUpdatedAt
+                        $inc: {
+                            approvalCount: approvalDelta,
+                            disapprovalCount: disapprovalDelta
+                        },
+                        $set: { updatedAt: voteUpdatedAt }
                     },
                     { new: true }
                 ).then(updatedItem => {
                     if (updatedItem) {
-                        console.log(`DEBUG-VOTE-SERVER: Votes updated in MongoDB at ${voteUpdatedAt.toISOString()}`);
+                        console.log(`DEBUG-VOTE-SERVER: $inc applied (delta ${approvalDelta}/${disapprovalDelta}) -> approvals=${updatedItem.approvalCount} disapprovals=${updatedItem.disapprovalCount} at ${voteUpdatedAt.toISOString()}`);
 
                         const globalIndex = global.allFeedItems.findIndex(item =>
                             String(item.id) === String(feedItemId)
                         );
 
                         if (globalIndex !== -1) {
-                            global.allFeedItems[globalIndex].approvalCount = feedItem.approvalCount;
-                            global.allFeedItems[globalIndex].disapprovalCount = feedItem.disapprovalCount;
+                            global.allFeedItems[globalIndex].approvalCount = updatedItem.approvalCount;
+                            global.allFeedItems[globalIndex].disapprovalCount = updatedItem.disapprovalCount;
                             global.allFeedItems[globalIndex].updatedAt = voteUpdatedAt;
                         }
 
-                        res.json({ success: true });
+                        res.json({
+                            success: true,
+                            approvalCount: updatedItem.approvalCount,
+                            disapprovalCount: updatedItem.disapprovalCount
+                        });
                     } else {
                         res.status(404).json({ error: 'Item not found' });
                     }
