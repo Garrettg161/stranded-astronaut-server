@@ -1,13 +1,4 @@
-// Stranded Astronaut Server version 141
-// v141: RC5-1 Bug 2 fix. updateVoteCount now sets updatedAt: new Date() in the
-//   findOneAndUpdate payload so vote changes are visible to delta-sync queries
-//   (which filter on updatedAt > sinceDate). Mirrors the pattern used by every
-//   other write path (publishFeedItem, comment count $inc).
-//   Previously votes were invisible to delta sync; only full getFeedItems polls
-//   propagated them, which delayed cross-device vote updates indefinitely.
-//   Also bumps the in-memory global.allFeedItems entry's updatedAt so subsequent
-//   in-process reads see the same timestamp without waiting for a Mongo refetch.
-// v140: isLibraryDocument: schema + publish/update preservation
+// Stranded Astronaut Server version 140 -- isLibraryDocument: schema + publish/update preservation
 // v138: Case-insensitive session.messages filter in delete handler --
 //   FEED_ITEM: broadcasts now correctly removed when deleter's platform
 //   differs from publisher's platform (iOS uppercase vs Android lowercase UUIDs)
@@ -3029,32 +3020,26 @@ app.post('/feed', validateApiKey, (req, res) => {
                     ]
                 };
 
-                // v141: bump updatedAt so delta-sync queries (updatedAt > sinceDate)
-                // see the change. Without this, other clients' auto-refresh never
-                // pulls vote updates -- only a full getFeedItems poll does.
-                const voteUpdatedAt = new Date();
                 FeedItem.findOneAndUpdate(
                     findQuery,
                     {
                         approvalCount: feedItem.approvalCount,
-                        disapprovalCount: feedItem.disapprovalCount,
-                        updatedAt: voteUpdatedAt
+                        disapprovalCount: feedItem.disapprovalCount
                     },
                     { new: true }
                 ).then(updatedItem => {
                     if (updatedItem) {
-                        console.log(`DEBUG-VOTE-SERVER: Votes updated in MongoDB at ${voteUpdatedAt.toISOString()}`);
-
+                        console.log(`DEBUG-VOTE-SERVER: Votes updated in MongoDB`);
+                        
                         const globalIndex = global.allFeedItems.findIndex(item =>
                             String(item.id) === String(feedItemId)
                         );
-
+                        
                         if (globalIndex !== -1) {
                             global.allFeedItems[globalIndex].approvalCount = feedItem.approvalCount;
                             global.allFeedItems[globalIndex].disapprovalCount = feedItem.disapprovalCount;
-                            global.allFeedItems[globalIndex].updatedAt = voteUpdatedAt;
                         }
-
+                        
                         res.json({ success: true });
                     } else {
                         res.status(404).json({ error: 'Item not found' });
