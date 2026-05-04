@@ -1,4 +1,15 @@
-// Stranded Astronaut Server version 142
+// Stranded Astronaut Server version 143
+// v143: ID-case canonicalization at the request boundary. Every incoming
+//   feedItemId and feedItem.{id,parentId,feedItemID} is lowercased by the
+//   middleware right after JSON parsing, so every handler can assume IDs are
+//   lowercase from this point on. Eliminates the asymmetry that left some DB
+//   items stored uppercase (pre-v215 iOS publishes, manual curl-published
+//   TheBook chapters per SERVER_API_GUIDE example) and others lowercase
+//   (post-v215 iOS publishes), causing the vote endpoint -- which sends
+//   uppercase from iOS UUID.uuidString -- to 404 on lowercase items.
+//   Run migrate-lowercase-feeditem-ids.js once after deploying to normalize
+//   existing DB rows. New rule: a FeedItem ID is lowercase on the wire and in
+//   MongoDB. Period. No more case point-fixes.
 // v142: RC5-1 Bug 5 fix. updateVoteCount now uses atomic $inc with client-supplied
 //   approvalDelta/disapprovalDelta instead of $set with client-supplied absolute
 //   approvalCount/disapprovalCount. The absolute-count protocol was last-writer-wins:
@@ -537,6 +548,30 @@ function initializeFeedItemIdCounter() {
 // Middleware
 app.use(cors());
 app.use(bodyParser.json({ limit: '500mb' })); // Increase JSON size limit for base64 data
+
+// v143: SINGLE SOURCE OF TRUTH for FeedItem ID case. Every incoming ID field is
+// lowercased here, before any handler sees it. After this middleware runs, the
+// rest of the server can assume IDs are lowercase, period. This eliminates the
+// asymmetry where iOS publish lowercased, server publish stored as-sent, vote
+// queried uppercase, delete lowercased, and various items ended up uppercase
+// in MongoDB while others ended up lowercase. New rule: every FeedItem ID is
+// lowercase on the wire and in storage. Run migrate-lowercase-feeditem-ids.js
+// once to normalize existing DB records that predate this middleware.
+app.use((req, res, next) => {
+    const body = req.body;
+    if (body && typeof body === 'object') {
+        if (typeof body.feedItemId === 'string') {
+            body.feedItemId = body.feedItemId.toLowerCase();
+        }
+        const fi = body.feedItem;
+        if (fi && typeof fi === 'object') {
+            if (typeof fi.id === 'string') fi.id = fi.id.toLowerCase();
+            if (typeof fi.parentId === 'string') fi.parentId = fi.parentId.toLowerCase();
+            if (typeof fi.feedItemID === 'string') fi.feedItemID = fi.feedItemID.toLowerCase();
+        }
+    }
+    next();
+});
 
 // API Key validation middleware
 const validateApiKey = (req, res, next) => {
