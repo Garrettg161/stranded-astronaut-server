@@ -1,4 +1,12 @@
-// Stranded Astronaut Server version 143
+// Stranded Astronaut Server version 144
+// v144: case-insensitive lookup in updateVoteCount. v143 middleware lowercases
+//   incoming feedItemId, but legacy DB rows stored uppercase (pre-v215 iOS
+//   publishes, TheBook chapters posted via the SERVER_API_GUIDE example which
+//   instructed uppercase) still need to be findable. Vote handler now matches
+//   id and feedItemID against BOTH the lowercased and uppercased form of the
+//   incoming id. No DB migration; legacy uppercase rows stay uppercase, new
+//   rows are lowercase, queries find either. Fixes vote-404 on Mastodon
+//   reposts and any other lowercase-stored item.
 // v143: ID-case canonicalization at the request boundary. Every incoming
 //   feedItemId and feedItem.{id,parentId,feedItemID} is lowercased by the
 //   middleware right after JSON parsing, so every handler can assume IDs are
@@ -3071,12 +3079,15 @@ app.post('/feed', validateApiKey, (req, res) => {
                 const disapprovalDelta = Number(feedItem.disapprovalDelta) || 0;
                 console.log(`DEBUG-VOTE-SERVER: Updating votes for ${feedItemId} - approvalDelta: ${approvalDelta}, disapprovalDelta: ${disapprovalDelta}`);
 
-                // Try to find by id first, then by feedItemID if not found
+                // v144: match either case in DB without requiring a migration.
+                // Middleware (v143) ensures feedItemId arrives lowercase; we
+                // also try uppercase to find legacy pre-v215 rows.
+                const idStr = String(feedItemId);
+                const idLower = idStr.toLowerCase();
+                const idUpper = idStr.toUpperCase();
+                const idVariants = (idLower === idUpper) ? [idLower] : [idLower, idUpper];
                 const findQuery = {
-                    $or: [
-                        { id: String(feedItemId) },
-                        { feedItemID: String(feedItemId) }
-                    ]
+                    $or: idVariants.flatMap(v => [{ id: v }, { feedItemID: v }])
                 };
 
                 const voteUpdatedAt = new Date();
