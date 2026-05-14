@@ -160,6 +160,7 @@ const feedItemSchema = new mongoose.Schema({
    commentCount: { type: Number, default: 0 },
    approvalCount: { type: Number, default: 0 },
    disapprovalCount: { type: Number, default: 0 },
+   shareCount: { type: Number, default: 0 },  // RC6 (2026-05-14): community-wide share counter for FeedRankingSystem v3 virality ranking. Incremented atomically via updateShareCount action ($inc, never $set) so concurrent shares from different devices all count.
    isDirectMessage: { type: Boolean, default: false },
    recipients: [String],
    isGroupMessage: { type: Boolean, default: false },
@@ -3132,6 +3133,62 @@ app.post('/feed', validateApiKey, (req, res) => {
             }
             break;
 
+        case 'updateShareCount':
+            // RC6 (2026-05-14): community-wide share counter. Mirrors updateVoteCount's
+            // atomic-delta pattern (server v142+) -- concurrent shares from different
+            // devices must all count, so $inc not $set. Client sends
+            // feedItem: { shareDelta: 1 }; server returns the authoritative shareCount
+            // so client can write through to its local cache + broadcast via
+            // FeedItemUpdated. Single-direction (always +1; no un-share affordance).
+            if (feedItemId && feedItem && typeof feedItem.shareDelta === 'number') {
+                const shareDelta = Number(feedItem.shareDelta) || 0;
+                console.log(`DEBUG-SHARE-SERVER: Incrementing shareCount for ${feedItemId} by ${shareDelta}`);
+
+                // v144 ID-matching pattern: try both case variants for legacy rows.
+                const idStr = String(feedItemId);
+                const idLower = idStr.toLowerCase();
+                const idUpper = idStr.toUpperCase();
+                const idVariants = (idLower === idUpper) ? [idLower] : [idLower, idUpper];
+                const findQuery = {
+                    $or: idVariants.flatMap(v => [{ id: v }, { feedItemID: v }])
+                };
+
+                const shareUpdatedAt = new Date();
+                FeedItem.findOneAndUpdate(
+                    findQuery,
+                    {
+                        $inc: { shareCount: shareDelta },
+                        $set: { updatedAt: shareUpdatedAt }
+                    },
+                    { new: true }
+                ).then(updatedItem => {
+                    if (updatedItem) {
+                        console.log(`DEBUG-SHARE-SERVER: $inc applied (delta ${shareDelta}) -> shareCount=${updatedItem.shareCount} at ${shareUpdatedAt.toISOString()}`);
+
+                        const globalIndex = global.allFeedItems.findIndex(item =>
+                            String(item.id) === String(feedItemId)
+                        );
+                        if (globalIndex !== -1) {
+                            global.allFeedItems[globalIndex].shareCount = updatedItem.shareCount;
+                            global.allFeedItems[globalIndex].updatedAt = shareUpdatedAt;
+                        }
+
+                        res.json({
+                            success: true,
+                            shareCount: updatedItem.shareCount
+                        });
+                    } else {
+                        res.status(404).json({ error: 'Item not found' });
+                    }
+                }).catch(err => {
+                    console.error(`DEBUG-SHARE-SERVER: Error: ${err}`);
+                    res.status(500).json({ error: 'Database error' });
+                });
+            } else {
+                res.status(400).json({ error: 'Missing feed item ID or shareDelta' });
+            }
+            break;
+
         // Find the 'get' case in the switch statement of the /feed endpoint
         case 'get':
             // Active Users: record this player's presence on every sync
@@ -3569,6 +3626,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                             if (feedItem.disapprovalCount !== undefined) {
                                 processedItem.disapprovalCount = feedItem.disapprovalCount;
                             }
+                            // RC6: preserve share count from client update (parallel to votes)
+                            if (feedItem.shareCount !== undefined) {
+                                processedItem.shareCount = feedItem.shareCount;
+                            }
                             // Update the item in the global pool
                             global.allFeedItems[globalIndex] = processedItem;
                             console.log(`Updated item in global feed items pool`);
@@ -3600,7 +3661,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 if (feedItem.disapprovalCount !== undefined) {
                                     processedItem.disapprovalCount = feedItem.disapprovalCount;
                                 }
-                                
+                                // RC6: preserve share count from client update (parallel to votes)
+                                if (feedItem.shareCount !== undefined) {
+                                    processedItem.shareCount = feedItem.shareCount;
+                                }
+
                                 // Update the item
                                 session.feedItems[sessionIndex] = processedItem;
                                 console.log(`Updated item in session ${sessId}`);
@@ -3684,7 +3749,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                         if (feedItem.disapprovalCount !== undefined) {
                             processedItem.disapprovalCount = feedItem.disapprovalCount;
                         }
-                        
+                        // RC6: preserve share count from client update (parallel to votes)
+                        if (feedItem.shareCount !== undefined) {
+                            processedItem.shareCount = feedItem.shareCount;
+                        }
+
                         global.allFeedItems[globalIndex] = processedItem;
                         console.log(`Updated item in global feed items pool (DB fallback)`);
                     } else {
@@ -3706,7 +3775,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                             if (feedItem.disapprovalCount !== undefined) {
                                 processedItem.disapprovalCount = feedItem.disapprovalCount;
                             }
-                            
+                            // RC6: preserve share count from client update (parallel to votes)
+                            if (feedItem.shareCount !== undefined) {
+                                processedItem.shareCount = feedItem.shareCount;
+                            }
+
                             session.feedItems[sessionIndex] = processedItem;
                         } else {
                             session.feedItems.push(processedItem);
