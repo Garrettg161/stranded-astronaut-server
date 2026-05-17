@@ -167,6 +167,7 @@ const feedItemSchema = new mongoose.Schema({
    groupName: String,
    topics: [String],
    attributedContentData: String,
+   htmlContent: String,  // RC6-1 Package B (2026-05-17): self-contained HTML payload for the .document HTML path. Mongoose strict mode was silently dropping this field on save until this line was added. Mirrors how attributedContentData is stored. Preserved on the 4 publish/update sites alongside other content fields.
    isDeleted: { type: Boolean, default: false },
    isRepost: { type: Boolean, default: false },
    isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
@@ -3630,6 +3631,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                             if (feedItem.shareCount !== undefined) {
                                 processedItem.shareCount = feedItem.shareCount;
                             }
+                            // RC6-1 Package B: preserve HTML document payload from client publish/update
+                            if (feedItem.htmlContent !== undefined) {
+                                processedItem.htmlContent = feedItem.htmlContent;
+                            }
                             // Update the item in the global pool
                             global.allFeedItems[globalIndex] = processedItem;
                             console.log(`Updated item in global feed items pool`);
@@ -3664,6 +3669,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 // RC6: preserve share count from client update (parallel to votes)
                                 if (feedItem.shareCount !== undefined) {
                                     processedItem.shareCount = feedItem.shareCount;
+                                }
+                                // RC6-1 Package B: preserve HTML document payload from client publish/update
+                                if (feedItem.htmlContent !== undefined) {
+                                    processedItem.htmlContent = feedItem.htmlContent;
                                 }
 
                                 // Update the item
@@ -3753,6 +3762,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                         if (feedItem.shareCount !== undefined) {
                             processedItem.shareCount = feedItem.shareCount;
                         }
+                        // RC6-1 Package B: preserve HTML document payload from client publish/update
+                        if (feedItem.htmlContent !== undefined) {
+                            processedItem.htmlContent = feedItem.htmlContent;
+                        }
 
                         global.allFeedItems[globalIndex] = processedItem;
                         console.log(`Updated item in global feed items pool (DB fallback)`);
@@ -3778,6 +3791,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                             // RC6: preserve share count from client update (parallel to votes)
                             if (feedItem.shareCount !== undefined) {
                                 processedItem.shareCount = feedItem.shareCount;
+                            }
+                            // RC6-1 Package B: preserve HTML document payload from client publish/update
+                            if (feedItem.htmlContent !== undefined) {
+                                processedItem.htmlContent = feedItem.htmlContent;
                             }
 
                             session.feedItems[sessionIndex] = processedItem;
