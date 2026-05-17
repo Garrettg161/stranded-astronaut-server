@@ -1,4 +1,19 @@
-// Stranded Astronaut Server version 144
+// Stranded Astronaut Server version 145
+// v145: RC6-1 Package C-1 (2026-05-17). feedItemSchema gains pdfContent: String
+//   alongside the existing htmlContent: String (added earlier for Package B).
+//   Document payloads -- attributedContentData, htmlContent, pdfContent -- are
+//   all stored opaquely as schema-declared strings; the server never decodes
+//   them. Mongoose strict mode (default) silently dropped pdfContent on every
+//   publish until this line was added, which manifested as PDF documents
+//   "flashing then blanking" on the publisher (whose local copy still held the
+//   payload) and never appearing on any other device (whose only copy came from
+//   the server). Same shape and same lesson as the htmlContent fix one deploy
+//   prior. The same defensive `if (feedItem.pdfContent !== undefined) ...`
+//   preservation block is mirrored at all 4 existing htmlContent preservation
+//   sites in the publish/update handlers, for symmetry with the shareCount /
+//   approvalCount / htmlContent precedent. NO data migration -- existing PDF
+//   items published before this deploy had their bytes dropped at write time
+//   and cannot be recovered; they must be re-published.
 // v144: case-insensitive lookup in updateVoteCount. v143 middleware lowercases
 //   incoming feedItemId, but legacy DB rows stored uppercase (pre-v215 iOS
 //   publishes, TheBook chapters posted via the SERVER_API_GUIDE example which
@@ -168,6 +183,7 @@ const feedItemSchema = new mongoose.Schema({
    topics: [String],
    attributedContentData: String,
    htmlContent: String,  // RC6-1 Package B (2026-05-17): self-contained HTML payload for the .document HTML path. Mongoose strict mode was silently dropping this field on save until this line was added. Mirrors how attributedContentData is stored. Preserved on the 4 publish/update sites alongside other content fields.
+   pdfContent: String,   // RC6-1 Package C-1 (2026-05-17): PDF document payload (base64-encoded PDF bytes on the wire). Same shape as htmlContent -- a content payload the server stores and returns verbatim, never decoded server-side. Without this line Mongoose strict mode silently drops the field on every publish, which manifested as "PDF flash then upgrade-notice" on the publisher and "no PDF at all" on every other device after the server's in-memory copy expired. Preserved on the same 4 publish/update sites alongside htmlContent.
    isDeleted: { type: Boolean, default: false },
    isRepost: { type: Boolean, default: false },
    isTheBook: { type: Boolean, default: false },  // Narrative storytelling content about dWorld
@@ -3635,6 +3651,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                             if (feedItem.htmlContent !== undefined) {
                                 processedItem.htmlContent = feedItem.htmlContent;
                             }
+                            // RC6-1 Package C-1: preserve PDF document payload (parallel to htmlContent)
+                            if (feedItem.pdfContent !== undefined) {
+                                processedItem.pdfContent = feedItem.pdfContent;
+                            }
                             // Update the item in the global pool
                             global.allFeedItems[globalIndex] = processedItem;
                             console.log(`Updated item in global feed items pool`);
@@ -3673,6 +3693,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                                 // RC6-1 Package B: preserve HTML document payload from client publish/update
                                 if (feedItem.htmlContent !== undefined) {
                                     processedItem.htmlContent = feedItem.htmlContent;
+                                }
+                                // RC6-1 Package C-1: preserve PDF document payload (parallel to htmlContent)
+                                if (feedItem.pdfContent !== undefined) {
+                                    processedItem.pdfContent = feedItem.pdfContent;
                                 }
 
                                 // Update the item
@@ -3766,6 +3790,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                         if (feedItem.htmlContent !== undefined) {
                             processedItem.htmlContent = feedItem.htmlContent;
                         }
+                        // RC6-1 Package C-1: preserve PDF document payload (parallel to htmlContent)
+                        if (feedItem.pdfContent !== undefined) {
+                            processedItem.pdfContent = feedItem.pdfContent;
+                        }
 
                         global.allFeedItems[globalIndex] = processedItem;
                         console.log(`Updated item in global feed items pool (DB fallback)`);
@@ -3795,6 +3823,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                             // RC6-1 Package B: preserve HTML document payload from client publish/update
                             if (feedItem.htmlContent !== undefined) {
                                 processedItem.htmlContent = feedItem.htmlContent;
+                            }
+                            // RC6-1 Package C-1: preserve PDF document payload (parallel to htmlContent)
+                            if (feedItem.pdfContent !== undefined) {
+                                processedItem.pdfContent = feedItem.pdfContent;
                             }
 
                             session.feedItems[sessionIndex] = processedItem;
