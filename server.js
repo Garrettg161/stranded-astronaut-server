@@ -2037,20 +2037,22 @@ app.delete('/signal/keys/:username', validateApiKey, async (req, res) => {
 // ACCOUNT DELETION CASCADE (Apple 5.1.1(v) compliance, 2026-05-29)
 // =============================================================================
 // Called by the identity server (NOT directly by iOS) when a user requests
-// account deletion. Removes/anonymizes game-server-side data tied to the user.
+// account deletion. Removes the departing user's server-side state:
+//   1. Authored FeedItems: anonymized (author -> "[deleted]"), content
+//      preserved. dWorld preserves public civic content even when the
+//      author deletes their account.
+//   2. Signal key bundles: deleted.
+//   3. KeyChangeNotifications (sender or recipient): deleted.
+//   4. Session state: cleared.
+//   5. DM ciphertext: NO special handling. In-flight DMs persist per the
+//      existing ~30-day retention policy. Recipients can decrypt prior
+//      DMs from this sender via Signal Protocol's session ratchet,
+//      independent of whether sender keys still exist server-side.
+//      This matches Signal/iMessage/WhatsApp/Matrix behavior.
 //
-// FeedItem handling:
-//   - AUTHORED items: anonymized (author -> "[deleted]"), not deleted.
-//     Other clients receive the new author string via delta sync.
-//   - DMs SENT TO this user: surgically remove this user from
-//     `recipients` and `encryptedDataPerRecipient`. Only fully delete if
-//     no co-recipients remain.
-// This preserves civic content and co-recipient delivery while still
-// satisfying Apple 5.1.1(v) account-deletion requirements.
-//
-// Method: POST (not DELETE) because the body carries phoneNumber + username
-// and Express DELETE handlers don't reliably parse JSON bodies across all
-// proxies. Server-to-server, so REST verb purity is secondary to reliability.
+// Method: POST (not DELETE) because the body carries phoneNumber +
+// username and Express DELETE handlers don't reliably parse JSON bodies
+// across all proxies. Server-to-server only.
 // =============================================================================
 app.post('/account/delete-user-data', validateApiKey, async (req, res) => {
     const startedAt = Date.now();
@@ -2133,100 +2135,24 @@ app.post('/account/delete-user-data', validateApiKey, async (req, res) => {
             console.warn(`[ACCOUNT-DELETE-CASCADE] KeyChangeNotification delete skipped: ${e.message}`);
         }
 
-        // -- Step 5: Remove user from DM recipient lists (DO NOT bulk delete) --
+        // -- Step 5: DM ciphertext -- intentionally NO special handling --
         //
-        // dWorld DMs are stored as single FeedItems with multiple recipients
-        // in the `recipients: [String]` array. Each recipient has their own
-        // encrypted payload in `encryptedDataPerRecipient` (keyed by
-        // username). Deleting the entire item would destroy delivery for the
-        // OTHER recipients who haven't yet synced -- a data-loss bug we'd
-        // be introducing.
+        // Industry standard (Signal, iMessage, WhatsApp, Matrix): when a
+        // user deletes their account, in-flight DM ciphertext is not
+        // touched. Delivered DMs are the recipient's data. Undelivered
+        // DMs expire via normal retention (the ~30-day offline-recipient
+        // buffer).
         //
-        // The correct surgical operation:
-        //   - $pull the deleting user from `recipients`.
-        //   - $unset their entry in `encryptedDataPerRecipient`.
-        //   - If that leaves `recipients` empty, the item has no remaining
-        //     deliveries to make: delete it.
+        // Signal Protocol's session-derived message keys mean recipients
+        // can still decrypt in-flight messages from this sender even after
+        // the sender's identity key bundle is deleted in Step 3. No
+        // special effort is made to guarantee this -- it works because of
+        // how the ratchet operates, not because of anything this endpoint
+        // does or preserves.
         //
-        // The Step 1 anonymization already handled items the user AUTHORED.
-        // This step handles items SENT TO the user (where they're a recipient
-        // but not the author).
-        //
-        // encryptionStatus filter: we exclude 'legacy' items, since those
-        // are public-feed items that share the recipients field for other
-        // purposes. We want only actually-encrypted DMs.
-        const userInDMs = await FeedItem.find({
-            encryptionStatus: { $ne: 'legacy' },
-            recipients: usernameRegex
-        });
-        let dmsCoRecipientPreserved = 0;
-        let dmsFullyDeleted = 0;
-        for (const dm of userInDMs) {
-            const remainingRecipients = (dm.recipients || []).filter(r =>
-                r.toLowerCase() !== username.toLowerCase()
-            );
-            if (remainingRecipients.length === 0) {
-                // No co-recipients; safe to fully delete the item.
-                await FeedItem.deleteOne({ _id: dm._id });
-                dmsFullyDeleted++;
-            } else {
-                // Co-recipients remain. Pull this user from recipients and
-                // strip their encrypted payload, preserving the item for
-                // others.
-                const updatePayload = {
-                    recipients: remainingRecipients,
-                    updatedAt: new Date()
-                };
-                if (dm.encryptedDataPerRecipient
-                    && typeof dm.encryptedDataPerRecipient === 'object') {
-                    const cleaned = { ...dm.encryptedDataPerRecipient };
-                    // Case-insensitive key removal -- usernames stored as
-                    // mixed case need a defensive sweep.
-                    for (const key of Object.keys(cleaned)) {
-                        if (key.toLowerCase() === username.toLowerCase()) {
-                            delete cleaned[key];
-                        }
-                    }
-                    updatePayload.encryptedDataPerRecipient = cleaned;
-                }
-                await FeedItem.updateOne({ _id: dm._id }, { $set: updatePayload });
-                dmsCoRecipientPreserved++;
-            }
-        }
-        // Also update the in-memory cache. Symmetry with Step 2.
-        if (global.allFeedItems) {
-            let inMemTouched = 0;
-            for (let i = global.allFeedItems.length - 1; i >= 0; i--) {
-                const item = global.allFeedItems[i];
-                if (!Array.isArray(item.recipients)) continue;
-                if (item.encryptionStatus === 'legacy') continue;
-                const hadUser = item.recipients.some(r =>
-                    r.toLowerCase() === username.toLowerCase()
-                );
-                if (!hadUser) continue;
-                const remaining = item.recipients.filter(r =>
-                    r.toLowerCase() !== username.toLowerCase()
-                );
-                if (remaining.length === 0) {
-                    global.allFeedItems.splice(i, 1);
-                } else {
-                    item.recipients = remaining;
-                    if (item.encryptedDataPerRecipient
-                        && typeof item.encryptedDataPerRecipient === 'object') {
-                        for (const key of Object.keys(item.encryptedDataPerRecipient)) {
-                            if (key.toLowerCase() === username.toLowerCase()) {
-                                delete item.encryptedDataPerRecipient[key];
-                            }
-                        }
-                    }
-                    item.updatedAt = new Date();
-                }
-                inMemTouched++;
-            }
-            console.log(`[ACCOUNT-DELETE-CASCADE] In-memory DM update: ${inMemTouched} items touched`);
-        }
-        results.dmCiphertext = dmsCoRecipientPreserved + dmsFullyDeleted;
-        console.log(`[ACCOUNT-DELETE-CASCADE] DM cleanup: ${dmsCoRecipientPreserved} updated (co-recipients preserved), ${dmsFullyDeleted} fully deleted (no co-recipients left)`);
+        // Result: this step is a no-op. The field stays in the response
+        // for envelope compatibility with the identity server.
+        results.dmCiphertext = 0;
 
         // -- Step 6: Clear gameSessions belonging to this user --
         if (typeof gameSessions === 'object' && gameSessions !== null) {
