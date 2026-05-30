@@ -2009,18 +2009,18 @@ app.get('/signal/keys/:username', validateApiKey, async (req, res) => {
 app.delete('/signal/keys/:username', validateApiKey, async (req, res) => {
     try {
         const { username } = req.params;
-
+        
         if (!username) {
             return res.status(400).json({ error: 'Missing username' });
         }
-
+        
         console.log(`DEBUG-SIGNAL: Deleting keys for ${username}`);
-
+        
         // Delete using case-insensitive match
         const result = await SignalKeyBundle.findOneAndDelete({
             username: { $regex: new RegExp(`^${username}$`, 'i') }
         });
-
+        
         if (result) {
             console.log(`DEBUG-SIGNAL: Successfully deleted keys for ${username}`);
             res.json({ success: true, message: `Keys deleted for ${username}` });
@@ -2030,226 +2030,6 @@ app.delete('/signal/keys/:username', validateApiKey, async (req, res) => {
     } catch (error) {
         console.error('Error deleting Signal keys:', error);
         res.status(500).json({ error: 'Failed to delete keys', details: error.message });
-    }
-});
-
-// =============================================================================
-// ACCOUNT DELETION CASCADE (Apple 5.1.1(v) compliance, 2026-05-29)
-// =============================================================================
-// Called by the identity server (NOT directly by iOS) when a user requests
-// account deletion. Removes/anonymizes game-server-side data tied to the user.
-//
-// FeedItem handling:
-//   - AUTHORED items: anonymized (author -> "[deleted]"), not deleted.
-//     Other clients receive the new author string via delta sync.
-//   - DMs SENT TO this user: surgically remove this user from
-//     `recipients` and `encryptedDataPerRecipient`. Only fully delete if
-//     no co-recipients remain.
-// This preserves civic content and co-recipient delivery while still
-// satisfying Apple 5.1.1(v) account-deletion requirements.
-//
-// Method: POST (not DELETE) because the body carries phoneNumber + username
-// and Express DELETE handlers don't reliably parse JSON bodies across all
-// proxies. Server-to-server, so REST verb purity is secondary to reliability.
-// =============================================================================
-app.post('/account/delete-user-data', validateApiKey, async (req, res) => {
-    const startedAt = Date.now();
-    const { phoneNumber, username } = req.body;
-
-    if (!phoneNumber || !username) {
-        return res.status(400).json({
-            success: false,
-            error: 'Missing phoneNumber or username'
-        });
-    }
-
-    console.log(`[ACCOUNT-DELETE-CASCADE] Starting for username=${username} phone=${phoneNumber}`);
-
-    const results = {
-        feedItems: 0,
-        signalKeys: false,
-        keyNotifications: 0,
-        dmCiphertext: 0,
-        sessions: 0
-    };
-
-    try {
-        // -- Step 1: Anonymize authored FeedItems (DO NOT delete) --
-        // dWorld preserves public civic content even when the author deletes
-        // their account, so comments and votes referencing the content keep
-        // their context. We replace the author identifier with a deleted-user
-        // marker. The content itself stays.
-        //
-        // Industry precedent: Reddit/Mastodon/Bluesky all anonymize rather
-        // than erase. Apple's 5.1.1(v) requires deleting the account and the
-        // user's personal data; community-visible content the user
-        // contributed is not their "personal data" in this sense.
-        //
-        // Users who want to remove individual FeedItems before deleting their
-        // account can do so via the in-app trash icon on each item (per the
-        // privacy policy).
-        const usernameRegex = new RegExp(`^${username}$`, 'i');
-        const anonResult = await FeedItem.updateMany(
-            { author: usernameRegex, isDeleted: { $ne: true } },
-            { $set: { author: '[deleted]', updatedAt: new Date() } }
-        );
-        results.feedItems = anonResult.modifiedCount || 0;
-        console.log(`[ACCOUNT-DELETE-CASCADE] Anonymized ${results.feedItems} FeedItems (author -> "[deleted]")`);
-
-        // -- Step 2: Update in-memory cache to match --
-        // Delta sync uses updatedAt to propagate changes to other clients;
-        // they will receive the new author string on next sync. No tombstone
-        // broadcast needed because the items still exist.
-        if (global.allFeedItems) {
-            let updated = 0;
-            global.allFeedItems.forEach(item => {
-                if ((item.author || '').toLowerCase() === username.toLowerCase()) {
-                    item.author = '[deleted]';
-                    item.updatedAt = new Date();
-                    updated++;
-                }
-            });
-            console.log(`[ACCOUNT-DELETE-CASCADE] Updated ${updated} items in global.allFeedItems`);
-        }
-
-        // -- Step 3: Delete Signal key bundle --
-        const sigResult = await SignalKeyBundle.findOneAndDelete({
-            username: { $regex: usernameRegex }
-        });
-        results.signalKeys = !!sigResult;
-        console.log(`[ACCOUNT-DELETE-CASCADE] Signal keys deleted: ${results.signalKeys}`);
-
-        // -- Step 4: Delete KeyChangeNotifications (sender or recipient) --
-        try {
-            const notifResult = await KeyChangeNotification.deleteMany({
-                $or: [
-                    { senderUsername: { $regex: usernameRegex } },
-                    { recipientUsername: { $regex: usernameRegex } }
-                ]
-            });
-            results.keyNotifications = notifResult.deletedCount || 0;
-            console.log(`[ACCOUNT-DELETE-CASCADE] Deleted ${results.keyNotifications} KeyChangeNotifications`);
-        } catch (e) {
-            console.warn(`[ACCOUNT-DELETE-CASCADE] KeyChangeNotification delete skipped: ${e.message}`);
-        }
-
-        // -- Step 5: Remove user from DM recipient lists (DO NOT bulk delete) --
-        //
-        // dWorld DMs are stored as single FeedItems with multiple recipients
-        // in the `recipients: [String]` array. Each recipient has their own
-        // encrypted payload in `encryptedDataPerRecipient` (keyed by
-        // username). Deleting the entire item would destroy delivery for the
-        // OTHER recipients who haven't yet synced -- a data-loss bug we'd
-        // be introducing.
-        //
-        // The correct surgical operation:
-        //   - $pull the deleting user from `recipients`.
-        //   - $unset their entry in `encryptedDataPerRecipient`.
-        //   - If that leaves `recipients` empty, the item has no remaining
-        //     deliveries to make: delete it.
-        //
-        // The Step 1 anonymization already handled items the user AUTHORED.
-        // This step handles items SENT TO the user (where they're a recipient
-        // but not the author).
-        //
-        // encryptionStatus filter: we exclude 'legacy' items, since those
-        // are public-feed items that share the recipients field for other
-        // purposes. We want only actually-encrypted DMs.
-        const userInDMs = await FeedItem.find({
-            encryptionStatus: { $ne: 'legacy' },
-            recipients: usernameRegex
-        });
-        let dmsCoRecipientPreserved = 0;
-        let dmsFullyDeleted = 0;
-        for (const dm of userInDMs) {
-            const remainingRecipients = (dm.recipients || []).filter(r =>
-                r.toLowerCase() !== username.toLowerCase()
-            );
-            if (remainingRecipients.length === 0) {
-                // No co-recipients; safe to fully delete the item.
-                await FeedItem.deleteOne({ _id: dm._id });
-                dmsFullyDeleted++;
-            } else {
-                // Co-recipients remain. Pull this user from recipients and
-                // strip their encrypted payload, preserving the item for
-                // others.
-                const updatePayload = {
-                    recipients: remainingRecipients,
-                    updatedAt: new Date()
-                };
-                if (dm.encryptedDataPerRecipient
-                    && typeof dm.encryptedDataPerRecipient === 'object') {
-                    const cleaned = { ...dm.encryptedDataPerRecipient };
-                    // Case-insensitive key removal -- usernames stored as
-                    // mixed case need a defensive sweep.
-                    for (const key of Object.keys(cleaned)) {
-                        if (key.toLowerCase() === username.toLowerCase()) {
-                            delete cleaned[key];
-                        }
-                    }
-                    updatePayload.encryptedDataPerRecipient = cleaned;
-                }
-                await FeedItem.updateOne({ _id: dm._id }, { $set: updatePayload });
-                dmsCoRecipientPreserved++;
-            }
-        }
-        // Also update the in-memory cache. Symmetry with Step 2.
-        if (global.allFeedItems) {
-            let inMemTouched = 0;
-            for (let i = global.allFeedItems.length - 1; i >= 0; i--) {
-                const item = global.allFeedItems[i];
-                if (!Array.isArray(item.recipients)) continue;
-                if (item.encryptionStatus === 'legacy') continue;
-                const hadUser = item.recipients.some(r =>
-                    r.toLowerCase() === username.toLowerCase()
-                );
-                if (!hadUser) continue;
-                const remaining = item.recipients.filter(r =>
-                    r.toLowerCase() !== username.toLowerCase()
-                );
-                if (remaining.length === 0) {
-                    global.allFeedItems.splice(i, 1);
-                } else {
-                    item.recipients = remaining;
-                    if (item.encryptedDataPerRecipient
-                        && typeof item.encryptedDataPerRecipient === 'object') {
-                        for (const key of Object.keys(item.encryptedDataPerRecipient)) {
-                            if (key.toLowerCase() === username.toLowerCase()) {
-                                delete item.encryptedDataPerRecipient[key];
-                            }
-                        }
-                    }
-                    item.updatedAt = new Date();
-                }
-                inMemTouched++;
-            }
-            console.log(`[ACCOUNT-DELETE-CASCADE] In-memory DM update: ${inMemTouched} items touched`);
-        }
-        results.dmCiphertext = dmsCoRecipientPreserved + dmsFullyDeleted;
-        console.log(`[ACCOUNT-DELETE-CASCADE] DM cleanup: ${dmsCoRecipientPreserved} updated (co-recipients preserved), ${dmsFullyDeleted} fully deleted (no co-recipients left)`);
-
-        // -- Step 6: Clear gameSessions belonging to this user --
-        if (typeof gameSessions === 'object' && gameSessions !== null) {
-            let sessionCount = 0;
-            Object.keys(gameSessions).forEach(sessId => {
-                const session = gameSessions[sessId];
-                if (session && session.username &&
-                    session.username.toLowerCase() === username.toLowerCase()) {
-                    delete gameSessions[sessId];
-                    sessionCount++;
-                }
-            });
-            results.sessions = sessionCount;
-            console.log(`[ACCOUNT-DELETE-CASCADE] Cleared ${sessionCount} sessions`);
-        }
-
-        const elapsedMs = Date.now() - startedAt;
-        console.log(`[ACCOUNT-DELETE-CASCADE] COMPLETE in ${elapsedMs}ms`);
-        return res.json({ success: true, results, elapsedMs });
-
-    } catch (error) {
-        console.error(`[ACCOUNT-DELETE-CASCADE] FATAL: ${error.message}`);
-        return res.status(500).json({ success: false, error: error.message, results });
     }
 });
 
