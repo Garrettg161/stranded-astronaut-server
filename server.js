@@ -5327,6 +5327,19 @@ app.get('/analytics/dashboard-ui/:orgId', async (req, res) => {
     }
 });
 
+// Guideline 1.2 user-content reports (2026-06-01). The iOS client (ReportSubmitter)
+// POSTs here; the [REPORT] audit line in Railway logs is the moderation trail
+// Garrett reviews within 24h. Uses validateApiKey -- the same Bearer the client
+// already sends. Path is /api/report to match the shipped 3372 client exactly.
+app.post('/api/report', validateApiKey, (req, res) => {
+    const { itemID, itemTitle, author, reportedBy, reason, platform, timestamp } = req.body || {};
+    if (!itemID || !author || !reportedBy) {
+        return res.status(400).json({ error: 'missing required fields: itemID, author, reportedBy' });
+    }
+    console.log(`[REPORT] item=${itemID} title="${(itemTitle || '').slice(0, 200)}" author=${author} reportedBy=${reportedBy} reason=${reason || 'unspecified'} platform=${platform || 'unknown'} at=${timestamp || new Date().toISOString()}`);
+    res.json({ success: true, message: 'Report received; we will review within 24 hours.' });
+});
+
    app.listen(port, () => {
        console.log(`Stranded Astronaut Multiplayer Server v2.3 with Resistance Feed Support running on port ${port}`);
        console.log(`Server initialized with ${global.allFeedItems ? global.allFeedItems.length : 0} global feed items`);
