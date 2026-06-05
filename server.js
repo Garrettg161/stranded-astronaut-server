@@ -99,6 +99,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
+const helmet = require('helmet');
 const mongoose = require('mongoose');
 const app = express();
 const port = process.env.PORT || 3000;
@@ -572,8 +573,21 @@ function initializeFeedItemIdCounter() {
 }
 
 // Middleware
-app.use(cors());
-app.use(bodyParser.json({ limit: '500mb' })); // Increase JSON size limit for base64 data
+// E-FIX-1: security headers (also removes x-powered-by)
+app.use(helmet());
+// E-FIX-1: CORS allowlist. Native app/curl send no Origin -> allowed.
+// Browsers are blocked unless their Origin is in CORS_ALLOWED_ORIGINS (csv).
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({
+  origin: function (origin, cb) {
+    if (!origin) return cb(null, true);
+    return cb(null, allowedOrigins.includes(origin));
+  }
+}));
+// E-FIX-1: body cap (was 500mb -- a memory-exhaustion DoS). Env-tunable.
+const BODY_LIMIT = process.env.BODY_LIMIT || '25mb';
+app.use(bodyParser.json({ limit: BODY_LIMIT }));
 
 // v143: SINGLE SOURCE OF TRUTH for FeedItem ID case. Every incoming ID field is
 // lowercased here, before any handler sees it. After this middleware runs, the
@@ -5338,6 +5352,13 @@ app.post('/api/report', validateApiKey, (req, res) => {
     }
     console.log(`[REPORT] item=${itemID} title="${(itemTitle || '').slice(0, 200)}" author=${author} reportedBy=${reportedBy} reason=${reason || 'unspecified'} platform=${platform || 'unknown'} at=${timestamp || new Date().toISOString()}`);
     res.json({ success: true, message: 'Report received; we will review within 24 hours.' });
+});
+
+// E-FIX-1: last-resort error handler -- never leak internals to the client.
+app.use((err, req, res, next) => {
+  console.error('UNHANDLED-ERROR:', err && err.message);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
    app.listen(port, () => {
