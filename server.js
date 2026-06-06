@@ -589,6 +589,21 @@ app.use(cors({
 const BODY_LIMIT = process.env.BODY_LIMIT || '25mb';
 app.use(bodyParser.json({ limit: BODY_LIMIT }));
 
+// E-FIX-2: per-IP global rate limit (env-tunable). Skips the hot client read
+// paths (feed sync, per-image /media, health/ping, root) so normal feed and
+// image loading is never throttled; protects the write/admin endpoints.
+const rateLimit = require('express-rate-limit');
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX || 600),
+  standardHeaders: true, legacyHeaders: false,
+  skip: function (req) {
+    return req.path === '/sync' || req.path.startsWith('/media/') ||
+           req.path === '/health' || req.path === '/ping' || req.path === '/';
+  }
+});
+app.use(globalLimiter);
+
 // v143: SINGLE SOURCE OF TRUTH for FeedItem ID case. Every incoming ID field is
 // lowercased here, before any handler sees it. After this middleware runs, the
 // rest of the server can assume IDs are lowercase, period. This eliminates the
