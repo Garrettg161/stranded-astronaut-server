@@ -658,6 +658,52 @@ app.get('/debug/counter', validateApiKey, (req, res) => {
    });
 });
 
+// READ-ONLY: find soft-deleted feed items still in MongoDB.
+// /sync only serves isDeleted:false (via global.allFeedItems), so deleted
+// items are invisible there. This queries the DB directly, and also checks
+// the FeedItemHistory collection. Optional ?title=substring (case-insensitive).
+// Example: /debug/deleted?title=Wages
+app.get('/debug/deleted', validateApiKey, async (req, res) => {
+   try {
+       const titleQuery = req.query.title;
+       const baseFilter = titleQuery
+           ? { title: { $regex: titleQuery, $options: 'i' } }
+           : {};
+       const slim = (item) => ({
+           id: item.id,
+           feedItemID: item.feedItemID,
+           title: item.title,
+           type: item.type,
+           author: item.author,
+           webUrl: item.webUrl,
+           isDeleted: item.isDeleted,
+           timestamp: item.timestamp,
+           updatedAt: item.updatedAt
+       });
+
+       const deleted = await FeedItem.find({ ...baseFilter, isDeleted: true })
+           .sort({ updatedAt: -1 }).limit(50).lean();
+
+       let history = [];
+       try {
+           history = await FeedItemHistory.find(baseFilter)
+               .sort({ updatedAt: -1 }).limit(50).lean();
+       } catch (e) {
+           // history collection may not exist; ignore
+       }
+
+       res.json({
+           deletedCount: deleted.length,
+           deleted: deleted.map(slim),
+           historyCount: history.length,
+           history: history.map(slim)
+       });
+   } catch (err) {
+       console.error('[/debug/deleted] error:', err);
+       res.status(500).json({ error: err.message });
+   }
+});
+
 // Test endpoint to find duplicates/replicants
 app.get('/debug/duplicates', validateApiKey, (req, res) => {
    // Check for duplicate ids
