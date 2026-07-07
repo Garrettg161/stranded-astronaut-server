@@ -1,4 +1,9 @@
-// Stranded Astronaut Server version 145
+// Stranded Astronaut Server version 146
+// v146: P-PRECINCT-COLLAB-V3 (2026-07-07). feedItemSchema gains groupId: String next to
+//   groupName. Mongoose strict mode was silently dropping groupId on save (same class of
+//   bug as htmlContent/pdfContent), so collab group DMs lost their stable identity and all
+//   collapsed into one participant-set thread. Schema-only; groupId round-trips via the
+//   publish spread + /sync return exactly like groupName. Delivery/encryption untouched.
 // v145: RC6-1 Package C-1 (2026-05-17). feedItemSchema gains pdfContent: String
 //   alongside the existing htmlContent: String (added earlier for Package B).
 //   Document payloads -- attributedContentData, htmlContent, pdfContent -- are
@@ -181,6 +186,7 @@ const feedItemSchema = new mongoose.Schema({
    recipients: [String],
    isGroupMessage: { type: Boolean, default: false },
    groupName: String,
+   groupId: { type: String, default: null },  // P-PRECINCT-COLLAB-V3 (2026-07-07): stable WhatsApp-style group identity for collab group chats. Mirrors groupName exactly -- schema-only, rides the {...feedItem} publish spread + /sync return, no explicit write-path copy (same as groupName). Without this line Mongoose strict mode silently drops groupId on save, so every collab message between two users collapsed into one participant-set thread mislabeled by whichever arrived last. Purely additive; delivery/encryption/recipients untouched.
    topics: [String],
    attributedContentData: String,
    htmlContent: String,  // RC6-1 Package B (2026-05-17): self-contained HTML payload for the .document HTML path. Mongoose strict mode was silently dropping this field on save until this line was added. Mirrors how attributedContentData is stored. Preserved on the 4 publish/update sites alongside other content fields.
