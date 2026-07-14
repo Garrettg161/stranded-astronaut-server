@@ -187,6 +187,13 @@ const feedItemSchema = new mongoose.Schema({
    isGroupMessage: { type: Boolean, default: false },
    groupName: String,
    groupId: { type: String, default: null },  // P-PRECINCT-COLLAB-V3 (2026-07-07): stable WhatsApp-style group identity for collab group chats. Mirrors groupName exactly -- schema-only, rides the {...feedItem} publish spread + /sync return, no explicit write-path copy (same as groupName). Without this line Mongoose strict mode silently drops groupId on save, so every collab message between two users collapsed into one participant-set thread mislabeled by whichever arrived last. Purely additive; delivery/encryption/recipients untouched.
+   groupEvent: String,  // GROUPCHAT-1 (2026-07-11): membership-mutation marker on group DMs.
+                        // "created" -> receivers set group admin = message author.
+                        // "left"    -> receivers remove message author from membership.
+                        // Stored and echoed verbatim, never interpreted server-side --
+                        // exactly like groupId/groupName. Without this line Mongoose
+                        // strict mode silently drops the field on publish (the named
+                        // failure class: every new payload field must be declared).
    topics: [String],
    attributedContentData: String,
    htmlContent: String,  // RC6-1 Package B (2026-05-17): self-contained HTML payload for the .document HTML path. Mongoose strict mode was silently dropping this field on save until this line was added. Mirrors how attributedContentData is stored. Preserved on the 4 publish/update sites alongside other content fields.
