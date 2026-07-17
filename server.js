@@ -159,6 +159,7 @@ const feedItemSchema = new mongoose.Schema({
    author: { type: String, required: true },
    authorId: { type: String, required: true },
    organization: { type: String, default: 'Resistance' },
+   additionalOrganizations: [String],  // WHITELABEL-3: extra org memberships beyond primary (multi-org authoring + Admin share). Mirrors topics[].
    timestamp: { type: Date, default: Date.now },
    updatedAt: { type: Date, default: Date.now },  // Delta sync - tracks last modification time
    imageUrl: String,
@@ -3381,6 +3382,51 @@ app.post('/feed', validateApiKey, (req, res) => {
                 });
             } else {
                 res.status(400).json({ error: 'Missing feed item ID or vote data' });
+            }
+            break;
+
+        case 'addOrganization':
+            // WHITELABEL-3: an org Admin adopts (shares) an existing item into their organization.
+            // Atomic $addToSet on additionalOrganizations -- never rewrites content (unlike publish),
+            // so it is safe against display-stripped client payloads. The org to add rides in
+            // feedItem.organization.
+            if (feedItemId && feedItem && feedItem.organization) {
+                const orgToAdd = String(feedItem.organization);
+                console.log(`DEBUG-WHITELABEL-SERVER: Adopting ${feedItemId} into org '${orgToAdd}'`);
+                const orgFindQuery = {
+                    $or: [
+                        { id: String(feedItemId) },
+                        { feedItemID: String(feedItemId) }
+                    ]
+                };
+                FeedItem.findOneAndUpdate(
+                    orgFindQuery,
+                    { $addToSet: { additionalOrganizations: orgToAdd }, $set: { updatedAt: new Date() } },
+                    { new: true }
+                ).then(updatedItem => {
+                    if (updatedItem) {
+                        const additional = updatedItem.additionalOrganizations || [];
+                        const globalIndex = global.allFeedItems.findIndex(item => String(item.id) === String(feedItemId));
+                        if (globalIndex !== -1) {
+                            global.allFeedItems[globalIndex].additionalOrganizations = additional;
+                            global.allFeedItems[globalIndex].updatedAt = updatedItem.updatedAt;
+                        }
+                        if (gameSessions[sessionId] && gameSessions[sessionId].feedItems) {
+                            const sIdx = gameSessions[sessionId].feedItems.findIndex(item => String(item.id) === String(feedItemId));
+                            if (sIdx !== -1) {
+                                gameSessions[sessionId].feedItems[sIdx].additionalOrganizations = additional;
+                            }
+                        }
+                        res.json({ success: true, additionalOrganizations: additional });
+                    } else {
+                        res.status(404).json({ error: 'Item not found' });
+                    }
+                }).catch(err => {
+                    console.error(`DEBUG-WHITELABEL-SERVER: Error: ${err}`);
+                    res.status(500).json({ error: 'Database error' });
+                });
+            } else {
+                res.status(400).json({ error: 'Missing feed item ID or organization' });
             }
             break;
 
