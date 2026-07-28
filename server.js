@@ -1,4 +1,6 @@
-// Stranded Astronaut Server version 146
+// Stranded Astronaut Server version 147
+// v147: SIGNALKEYS-CASEFIX-1 (2026-07-28). CASEFIX: upload-keys username matching made
+//   case-insensitive to match reads; fixes forked key records (george/paine wedge).
 // v146: P-PRECINCT-COLLAB-V3 (2026-07-07). feedItemSchema gains groupId: String next to
 //   groupName. Mongoose strict mode was silently dropping groupId on save (same class of
 //   bug as htmlContent/pdfContent), so collab group DMs lost their stable identity and all
@@ -1959,7 +1961,7 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
         console.log(`DEBUG-SIGNAL: Uploading keys for ${username}, preKeys count: ${keyBundle.preKeys.length}`);
 
         // Get existing bundle for comparison
-        const existingBundle = await SignalKeyBundle.findOne({ username: username });
+        const existingBundle = await SignalKeyBundle.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
 
         // Calculate new fingerprint
         const newFingerprint = calculateKeyFingerprint(keyBundle.identityKey);
@@ -2013,7 +2015,7 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
 
         // Upsert the key bundle
         await SignalKeyBundle.findOneAndUpdate(
-            { username: username },
+            { username: { $regex: new RegExp(`^${username}$`, 'i') } },
             {
                 username: username,
                 registrationId: keyBundle.registrationId,
