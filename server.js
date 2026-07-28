@@ -1,4 +1,12 @@
-// Stranded Astronaut Server version 146
+// Stranded Astronaut Server version 147
+// v147: SIGNALKEYS-CASEFIX-1 + KEYHISTORY-BOUND (2026-07-28). Two coordinated fixes.
+//   (1) CASEFIX: /signal/upload-keys username matching (findOne 1962, findOneAndUpdate
+//   filter 2016) made case-insensitive to match reads/delete/admin -- fixes forked key
+//   records (george/paine wedge). (2) KEYHISTORY-BOUND: keyHistory $push (2032) was
+//   UNBOUNDED and accumulated one entry per upload; paine's record hit Mongo's 16MB ceiling
+//   and the casefix's case-insensitive matcher then selected it -> upload 500. Now $slice:-50
+//   keeps only the last 50 entries; every identity self-trims on its next upload (no fleet
+//   cleanup needed). paine's 16MB record was deleted (delete-verify) before this ships.
 // v146: P-PRECINCT-COLLAB-V3 (2026-07-07). feedItemSchema gains groupId: String next to
 //   groupName. Mongoose strict mode was silently dropping groupId on save (same class of
 //   bug as htmlContent/pdfContent), so collab group DMs lost their stable identity and all
@@ -1959,7 +1967,7 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
         console.log(`DEBUG-SIGNAL: Uploading keys for ${username}, preKeys count: ${keyBundle.preKeys.length}`);
 
         // Get existing bundle for comparison
-        const existingBundle = await SignalKeyBundle.findOne({ username: username });
+        const existingBundle = await SignalKeyBundle.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
 
         // Calculate new fingerprint
         const newFingerprint = calculateKeyFingerprint(keyBundle.identityKey);
@@ -2013,7 +2021,7 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
 
         // Upsert the key bundle
         await SignalKeyBundle.findOneAndUpdate(
-            { username: username },
+            { username: { $regex: new RegExp(`^${username}$`, 'i') } },
             {
                 username: username,
                 registrationId: keyBundle.registrationId,
@@ -2029,7 +2037,7 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
                 updatedAt: new Date(),
                 keyVersion: newKeyVersion,
                 identityKeyFingerprint: newFingerprint,
-                $push: { keyHistory: historyEntry }
+                $push: { keyHistory: { $each: [historyEntry], $slice: -50 } }
             },
             { upsert: true, new: true }
         );
