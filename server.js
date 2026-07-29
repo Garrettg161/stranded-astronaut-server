@@ -294,6 +294,12 @@ const signalKeyBundleSchema = new mongoose.Schema({
    }],
    updatedAt: { type: Date, default: Date.now },
 
+   // SELFHEAL-0-CAPABILITIES (SelfHeal_v3_Spec_v1_1): per-user set of self-heal
+   // features this client speaks (e.g. "keyChangeNotify","heartbeat","resendRequest").
+   // Additive advertisement; absent/empty => treat peer as legacy (today's behavior).
+   // MUST be declared here or Mongoose silently drops it on $set.
+   capabilities: { type: [String], default: [] },
+
    // v129: Added Mux video fields to FeedItem MongoDB schema
 //   - muxPlaybackId, muxStreamId, isLiveStream, liveStreamStatus now persist to database
 // v128: Mux video integration - live stream and VOD endpoints
@@ -2034,6 +2040,12 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
                 kyberPreKeyPublic: keyBundle.kyberPreKeyPublic,
                 kyberPreKeySignature: keyBundle.kyberPreKeySignature,
                 preKeys: keyBundle.preKeys,
+                // SELFHEAL-0-CAPABILITIES: replace (not $push), like preKeys. Optional field --
+                // when a client omits it, PRESERVE the existing advertised set rather than wiping
+                // it (an upload without caps must never downgrade a cap-advertising record).
+                capabilities: Array.isArray(keyBundle.capabilities)
+                    ? keyBundle.capabilities
+                    : (existingBundle && existingBundle.capabilities ? existingBundle.capabilities : []),
                 updatedAt: new Date(),
                 keyVersion: newKeyVersion,
                 identityKeyFingerprint: newFingerprint,
@@ -2090,7 +2102,10 @@ app.get('/signal/keys/:username', validateApiKey, async (req, res) => {
             kyberPreKeyId: keyBundle.kyberPreKeyId,
             kyberPreKeyPublic: keyBundle.kyberPreKeyPublic,
             kyberPreKeySignature: keyBundle.kyberPreKeySignature,
-            preKeys: keyBundle.preKeys
+            preKeys: keyBundle.preKeys,
+            // SELFHEAL-0-CAPABILITIES: advertise this peer's self-heal feature set to the
+            // fetching client. Default [] when absent so pre-SELFHEAL-0 records read as legacy.
+            capabilities: keyBundle.capabilities || []
         };
         
         console.log(`DEBUG-SIGNAL: Returning key bundle for ${username}, preKeys count: ${response.preKeys.length}`);
