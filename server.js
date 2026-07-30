@@ -843,6 +843,39 @@ app.get('/debug/comments/:feedItemId', validateApiKey, (req, res) => {
 // In-memory storage for game sessions
 const gameSessions = {};
 
+// SELFHEAL-4d: bound self-heal control-message storage. These are internal heartbeat/repair envelopes
+// published to /feed with title "__selfheal__" (never user content). They only need to survive one sync
+// (seconds) to be delivered; this sweep keeps them 10 min then auto-purges from Mongo, memory, and every
+// session cache so they can never accumulate again. A device offline longer self-corrects (its next
+// heartbeat / first failed real message re-triggers the heal).
+setInterval(async () => {
+    try {
+        const cutoff = new Date(Date.now() - 10 * 60 * 1000); // 10 min >> one sync interval
+        const result = await FeedItem.deleteMany({ title: '__selfheal__', timestamp: { $lt: cutoff } });
+        let mem = 0, sess = 0;
+        if (global.allFeedItems) {
+            const before = global.allFeedItems.length;
+            global.allFeedItems = global.allFeedItems.filter(i =>
+                !(i.title === '__selfheal__' && new Date(i.timestamp || 0) < cutoff));
+            mem = before - global.allFeedItems.length;
+        }
+        Object.keys(gameSessions).forEach(sid => {
+            const s = gameSessions[sid];
+            if (s && Array.isArray(s.feedItems)) {
+                const b = s.feedItems.length;
+                s.feedItems = s.feedItems.filter(i =>
+                    !(i.title === '__selfheal__' && new Date(i.timestamp || 0) < cutoff));
+                sess += (b - s.feedItems.length);
+            }
+        });
+        if (result.deletedCount || mem || sess) {
+            console.log(`SELFHEAL-4d sweep: purged mongo=${result.deletedCount} mem=${mem} sess=${sess}`);
+        }
+    } catch (e) {
+        console.error('SELFHEAL-4d sweep error:', e.message);
+    }
+}, 5 * 60 * 1000);
+
 // In-memory storage for players
 const players = {};
 
@@ -4754,6 +4787,40 @@ app.delete('/signal/cleanup-encrypted-messages', validateApiKey, async (req, res
             success: false,
             error: error.message
         });
+    }
+});
+
+// SELFHEAL-4d: purge self-heal control messages (title "__selfheal__" -- internal heartbeat/repair
+// envelopes, never user content). Drains the accumulated backlog; callable anytime. Scrubs Mongo, the
+// in-memory feed, and every session's cached feedItems so /sync stops serving them immediately.
+app.delete('/signal/cleanup-selfheal', validateApiKey, async (req, res) => {
+    try {
+        console.log('DEBUG-CLEANUP: Deleting self-heal control messages...');
+        const result = await FeedItem.deleteMany({ title: '__selfheal__' });
+        console.log(`DEBUG-CLEANUP: Deleted ${result.deletedCount} self-heal items from Mongo`);
+
+        let memRemoved = 0;
+        if (global.allFeedItems) {
+            const before = global.allFeedItems.length;
+            global.allFeedItems = global.allFeedItems.filter(i => i.title !== '__selfheal__');
+            memRemoved = before - global.allFeedItems.length;
+        }
+
+        let sessRemoved = 0;
+        Object.keys(gameSessions).forEach(sid => {
+            const s = gameSessions[sid];
+            if (s && Array.isArray(s.feedItems)) {
+                const b = s.feedItems.length;
+                s.feedItems = s.feedItems.filter(i => i.title !== '__selfheal__');
+                sessRemoved += (b - s.feedItems.length);
+            }
+        });
+
+        console.log(`DEBUG-CLEANUP: Removed ${memRemoved} from memory, ${sessRemoved} from sessions`);
+        res.json({ success: true, deletedCount: result.deletedCount, memoryRemoved: memRemoved, sessionRemoved: sessRemoved });
+    } catch (error) {
+        console.error('DEBUG-CLEANUP: self-heal cleanup error:', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
