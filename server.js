@@ -2375,51 +2375,36 @@ app.get('/notifications', validateApiKey, async (req, res) => {
 
         console.log(`DEBUG-KEY-VERSION: Fetching notifications for sender ${username}`);
 
-        // Get pending KEY_CHANGED notifications for this SENDER (case-insensitive re-encrypt flow)
+        // Get pending notifications for this sender (case-insensitive)
+        // SELFHEAL-6 SAFETY: this endpoint feeds the KeyChange handler (deletes sessions). It must NEVER
+        // return SELFHEAL control messages -- doing so made the untouched client pollNotifications treat
+        // them as key-changes and delete real sessions. SELFHEAL is delivered ONLY via /selfheal (below).
         const notifications = await KeyChangeNotification.find({
             senderUsername: { $regex: new RegExp(`^${username}$`, 'i') },
             type: { $ne: 'SELFHEAL' },
             status: { $in: ['pending', 'sent'] }
         }).sort({ createdAt: 1 });
 
-        // SELFHEAL-6: also drain ephemeral heal control messages ADDRESSED TO this user (as recipient).
-        const selfhealNotifs = await KeyChangeNotification.find({
-            recipientUsername: { $regex: new RegExp(`^${username}$`, 'i') },
-            type: 'SELFHEAL',
-            status: { $in: ['pending', 'sent'] }
-        }).sort({ createdAt: 1 });
-
-        const allToMark = [...notifications, ...selfhealNotifs].map(n => n.id);
-        if (allToMark.length > 0) {
+        if (notifications.length > 0) {
+            const notificationIds = notifications.map(n => n.id);
             await KeyChangeNotification.updateMany(
-                { id: { $in: allToMark } },
+                { id: { $in: notificationIds } },
                 { status: 'sent', sentAt: new Date(), $inc: { sendAttempts: 1 }, lastSendAttempt: new Date() }
             );
-            console.log(`DEBUG-KEY-VERSION: Returning ${notifications.length} key-change + ${selfhealNotifs.length} selfheal notifications for ${username}`);
+            console.log(`DEBUG-KEY-VERSION: Returning ${notifications.length} notifications for ${username}`);
         }
 
         res.json({
-            notifications: [
-                ...notifications.map(n => ({
-                    id: n.id,
-                    type: 'KEY_CHANGED',
-                    recipientUsername: n.recipientUsername,
-                    oldKeyVersion: n.oldKeyVersion,
-                    newKeyVersion: n.newKeyVersion,
-                    affectedMessageIds: n.affectedMessageIds,
-                    affectedMessageCount: n.affectedMessageCount,
-                    createdAt: n.createdAt
-                })),
-                // SELFHEAL-6: heal control message -- sender + opaque encrypted envelope (server never reads it).
-                ...selfhealNotifs.map(n => ({
-                    id: n.id,
-                    type: 'SELFHEAL',
-                    senderUsername: n.senderUsername,
-                    recipientUsername: n.recipientUsername,
-                    encryptedPayload: n.encryptedPayload,
-                    createdAt: n.createdAt
-                }))
-            ]
+            notifications: notifications.map(n => ({
+                id: n.id,
+                type: 'KEY_CHANGED',
+                recipientUsername: n.recipientUsername,
+                oldKeyVersion: n.oldKeyVersion,
+                newKeyVersion: n.newKeyVersion,
+                affectedMessageIds: n.affectedMessageIds,
+                affectedMessageCount: n.affectedMessageCount,
+                createdAt: n.createdAt
+            }))
         });
 
     } catch (error) {
