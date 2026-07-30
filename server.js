@@ -340,8 +340,13 @@ const keyChangeNotificationSchema = new mongoose.Schema({
    id: { type: String, required: true, unique: true, index: true },
    recipientUsername: { type: String, required: true, index: true },
    senderUsername: { type: String, required: true, index: true },
-   oldKeyVersion: { type: Number, required: true },
-   newKeyVersion: { type: Number, required: true },
+   // SELFHEAL-6: type discriminator. 'KEY_CHANGED' (default, legacy re-encrypt flow) or 'SELFHEAL'
+   // (ephemeral out-of-band heal control message: ping/ack/resendRequest). SELFHEAL notifications are
+   // recipient-addressed, carry an opaque per-recipient encrypted envelope, and are DELETED on ack.
+   type: { type: String, default: 'KEY_CHANGED', index: true },
+   encryptedPayload: String,   // SELFHEAL: the Signal-encrypted control envelope (opaque to server)
+   oldKeyVersion: { type: Number, default: 0 },
+   newKeyVersion: { type: Number, default: 0 },
    oldIdentityKeyFingerprint: String,
    newIdentityKeyFingerprint: String,
    affectedMessageIds: [String],
@@ -850,7 +855,11 @@ const gameSessions = {};
 // heartbeat / first failed real message re-triggers the heal).
 setInterval(async () => {
     try {
-        const cutoff = new Date(Date.now() - 10 * 60 * 1000); // 10 min >> one sync interval
+        const cutoff = new Date(Date.now() - 10 * 60 * 1000); // 10 min >> one poll interval
+        // SELFHEAL-6: purge undelivered ephemeral heal notifications (recipient offline > 10 min; a live
+        // device self-heals on its next heartbeat). Acked ones are already deleted on ack.
+        const shNotif = await KeyChangeNotification.deleteMany({ type: 'SELFHEAL', createdAt: { $lt: cutoff } });
+        // Legacy (pre-SELFHEAL-6): harmless cleanup of any __selfheal__ FeedItems that predate the transport move.
         const result = await FeedItem.deleteMany({ title: '__selfheal__', timestamp: { $lt: cutoff } });
         let mem = 0, sess = 0;
         if (global.allFeedItems) {
@@ -868,8 +877,8 @@ setInterval(async () => {
                 sess += (b - s.feedItems.length);
             }
         });
-        if (result.deletedCount || mem || sess) {
-            console.log(`SELFHEAL-4d sweep: purged mongo=${result.deletedCount} mem=${mem} sess=${sess}`);
+        if (shNotif.deletedCount || result.deletedCount || mem || sess) {
+            console.log(`SELFHEAL sweep: selfheal-notifs=${shNotif.deletedCount} legacy-feeditems mongo=${result.deletedCount} mem=${mem} sess=${sess}`);
         }
     } catch (e) {
         console.error('SELFHEAL-4d sweep error:', e.message);
@@ -2329,6 +2338,33 @@ app.post('/account/delete-user-data', validateApiKey, async (req, res) => {
 // ========================================
 
 // v127: Get pending notifications for a sender
+// SELFHEAL-6: client-originated ephemeral heal control message (ping/ack/resendRequest). Queued as a
+// recipient-addressed SELFHEAL notification carrying an opaque per-recipient encrypted envelope; drained
+// by the recipient's next /notifications poll and DELETED on ack. Never a FeedItem: not persisted long,
+// not ranked, not threaded, not backed up, not re-served.
+app.post('/notifications', validateApiKey, async (req, res) => {
+    try {
+        const { senderUsername, recipientUsername, encryptedPayload } = req.body;
+        if (!senderUsername || !recipientUsername || !encryptedPayload) {
+            return res.status(400).json({ error: 'Missing senderUsername, recipientUsername, or encryptedPayload' });
+        }
+        const notification = new KeyChangeNotification({
+            id: uuidv4(),
+            type: 'SELFHEAL',
+            recipientUsername,
+            senderUsername,
+            encryptedPayload,
+            status: 'pending',
+            expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 min: delivered within one poll, swept if not
+        });
+        await notification.save();
+        res.json({ success: true, id: notification.id });
+    } catch (error) {
+        console.error(`ERROR queueing selfheal notification: ${error}`);
+        res.status(500).json({ error: 'Failed to queue notification', details: error.message });
+    }
+});
+
 app.get('/notifications', validateApiKey, async (req, res) => {
     try {
         const { username } = req.query;
@@ -2339,39 +2375,51 @@ app.get('/notifications', validateApiKey, async (req, res) => {
 
         console.log(`DEBUG-KEY-VERSION: Fetching notifications for sender ${username}`);
 
-        // Get pending notifications for this sender (case-insensitive)
+        // Get pending KEY_CHANGED notifications for this SENDER (case-insensitive re-encrypt flow)
         const notifications = await KeyChangeNotification.find({
             senderUsername: { $regex: new RegExp(`^${username}$`, 'i') },
+            type: { $ne: 'SELFHEAL' },
             status: { $in: ['pending', 'sent'] }
         }).sort({ createdAt: 1 });
 
-        if (notifications.length > 0) {
-            // Mark as sent
-            const notificationIds = notifications.map(n => n.id);
-            await KeyChangeNotification.updateMany(
-                { id: { $in: notificationIds } },
-                {
-                    status: 'sent',
-                    sentAt: new Date(),
-                    $inc: { sendAttempts: 1 },
-                    lastSendAttempt: new Date()
-                }
-            );
+        // SELFHEAL-6: also drain ephemeral heal control messages ADDRESSED TO this user (as recipient).
+        const selfhealNotifs = await KeyChangeNotification.find({
+            recipientUsername: { $regex: new RegExp(`^${username}$`, 'i') },
+            type: 'SELFHEAL',
+            status: { $in: ['pending', 'sent'] }
+        }).sort({ createdAt: 1 });
 
-            console.log(`DEBUG-KEY-VERSION: Returning ${notifications.length} notifications for ${username}`);
+        const allToMark = [...notifications, ...selfhealNotifs].map(n => n.id);
+        if (allToMark.length > 0) {
+            await KeyChangeNotification.updateMany(
+                { id: { $in: allToMark } },
+                { status: 'sent', sentAt: new Date(), $inc: { sendAttempts: 1 }, lastSendAttempt: new Date() }
+            );
+            console.log(`DEBUG-KEY-VERSION: Returning ${notifications.length} key-change + ${selfhealNotifs.length} selfheal notifications for ${username}`);
         }
 
         res.json({
-            notifications: notifications.map(n => ({
-                id: n.id,
-                type: 'KEY_CHANGED',
-                recipientUsername: n.recipientUsername,
-                oldKeyVersion: n.oldKeyVersion,
-                newKeyVersion: n.newKeyVersion,
-                affectedMessageIds: n.affectedMessageIds,
-                affectedMessageCount: n.affectedMessageCount,
-                createdAt: n.createdAt
-            }))
+            notifications: [
+                ...notifications.map(n => ({
+                    id: n.id,
+                    type: 'KEY_CHANGED',
+                    recipientUsername: n.recipientUsername,
+                    oldKeyVersion: n.oldKeyVersion,
+                    newKeyVersion: n.newKeyVersion,
+                    affectedMessageIds: n.affectedMessageIds,
+                    affectedMessageCount: n.affectedMessageCount,
+                    createdAt: n.createdAt
+                })),
+                // SELFHEAL-6: heal control message -- sender + opaque encrypted envelope (server never reads it).
+                ...selfhealNotifs.map(n => ({
+                    id: n.id,
+                    type: 'SELFHEAL',
+                    senderUsername: n.senderUsername,
+                    recipientUsername: n.recipientUsername,
+                    encryptedPayload: n.encryptedPayload,
+                    createdAt: n.createdAt
+                }))
+            ]
         });
 
     } catch (error) {
@@ -2392,6 +2440,12 @@ app.post('/notifications/acknowledge', validateApiKey, async (req, res) => {
         const notification = await KeyChangeNotification.findOne({ id: notificationId });
         if (!notification) {
             return res.status(404).json({ error: 'Notification not found' });
+        }
+
+        // SELFHEAL-6: heal control messages are ephemeral -- ack DELETES them (deliver-once, no audit trail).
+        if (notification.type === 'SELFHEAL') {
+            await KeyChangeNotification.deleteOne({ id: notificationId });
+            return res.json({ success: true, deleted: true });
         }
 
         console.log(`DEBUG-KEY-VERSION: Acknowledging notification ${notificationId}: ${action}, success=${success}`);
