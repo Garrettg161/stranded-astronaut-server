@@ -1,4 +1,11 @@
-// Stranded Astronaut Server version 147
+// Stranded Astronaut Server version 148
+// v148: LESSON-0 (2026-08-16). feedItemSchema gains isLesson: Boolean,
+//   lessonPrompt: String, lessonSources: [String], preserved on the publish
+//   and update paths mirroring the isAIQuestion / aiQuestionText precedent.
+//   Same class of Mongoose-strict-mode fix as htmlContent / pdfContent /
+//   groupId. The lesson body itself travels in the existing htmlContent
+//   field; these three carry authoring intent only. Schema-only; no
+//   delivery, encryption, or sync-cursor behavior is touched.
 // v147: SIGNALKEYS-CASEFIX-1 + KEYHISTORY-BOUND (2026-07-28). Two coordinated fixes.
 //   (1) CASEFIX: /signal/upload-keys username matching (findOne 1962, findOneAndUpdate
 //   filter 2016) made case-insensitive to match reads/delete/admin -- fixes forked key
@@ -214,6 +221,9 @@ const feedItemSchema = new mongoose.Schema({
    isLibraryDocument: { type: Boolean, default: false },  // Library document flag for DocumentLibrary
    isAIQuestion: { type: Boolean, default: false },  // AI Question feed item flag
    aiQuestionText: String,  // Pre-written question text for AI injection
+   isLesson: { type: Boolean, default: false },  // LESSON-0 (2026-08-16): AI-generated HTML lesson document. The lesson body travels in htmlContent (declared above); this flag carries authoring intent so the client can label the item, shelve it in the Library, and regenerate it. Declared here because Mongoose strict mode silently drops undeclared fields on save -- the same failure that hit htmlContent, pdfContent, and groupId.
+   lessonPrompt: String,  // LESSON-0: the author's question, verbatim, e.g. "Teach me how the 25th Amendment works".
+   lessonSources: [String],  // LESSON-0: opaque source descriptors the lesson was grounded in (url:, item:, html:, pdf:, text:). Stored and returned verbatim; never interpreted server-side.
    isDatabaseItem: { type: Boolean, default: false },  // Database FeedItem flag
    databaseType: String,  // "poll", "petition", "pledge", "rsvp", etc.
    isFundraising: { type: Boolean, default: false },   // Fundraising FeedItem flag
@@ -2909,6 +2919,20 @@ app.post('/feed', validateApiKey, (req, res) => {
                         processedItem.aiQuestionText = feedItem.aiQuestionText;
                         console.log(`DEBUG-AIQUESTION: Publishing item with aiQuestionText`);
                     }
+
+                    // LESSON-0 fields (mirrors the AI Question block above)
+                    if (feedItem.isLesson) {
+                        processedItem.isLesson = true;
+                        console.log(`DEBUG-LESSON: Publishing item with isLesson=true`);
+                    }
+                    if (feedItem.lessonPrompt) {
+                        processedItem.lessonPrompt = feedItem.lessonPrompt;
+                        console.log(`DEBUG-LESSON: Publishing item with lessonPrompt`);
+                    }
+                    if (feedItem.lessonSources) {
+                        processedItem.lessonSources = feedItem.lessonSources;
+                        console.log(`DEBUG-LESSON: Publishing item with ${feedItem.lessonSources.length} lessonSources`);
+                    }
                 } catch (error) {
                     console.error("Error processing item:", error);
                     processedItem = {...feedItem};
@@ -3911,6 +3935,20 @@ app.post('/feed', validateApiKey, (req, res) => {
                 if (feedItem.aiQuestionText !== undefined) {
                     processedItem.aiQuestionText = feedItem.aiQuestionText;
                     console.log(`DEBUG-AIQUESTION: Updating item with aiQuestionText`);
+                }
+
+                // LESSON-0 fields during updates (mirrors the AI Question block above)
+                if (feedItem.isLesson !== undefined) {
+                    processedItem.isLesson = feedItem.isLesson;
+                    console.log(`DEBUG-LESSON: Updating item with isLesson=${feedItem.isLesson}`);
+                }
+                if (feedItem.lessonPrompt !== undefined) {
+                    processedItem.lessonPrompt = feedItem.lessonPrompt;
+                    console.log(`DEBUG-LESSON: Updating item with lessonPrompt`);
+                }
+                if (feedItem.lessonSources !== undefined) {
+                    processedItem.lessonSources = feedItem.lessonSources;
+                    console.log(`DEBUG-LESSON: Updating item with ${(feedItem.lessonSources || []).length} lessonSources`);
                 }
 
                 // Database FeedItem fields during updates
