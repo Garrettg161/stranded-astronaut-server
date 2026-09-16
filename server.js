@@ -444,7 +444,7 @@ async function queueKeyChangeNotifications(username, oldKeyVersion, newKeyVersio
    // Find all undelivered messages TO this user (case-insensitive)
    const undeliveredMessages = await FeedItem.find({
       isDirectMessage: true,
-      recipients: { $elemMatch: { $regex: new RegExp(`^${username}$`, 'i') } }
+      recipients: { $elemMatch: { $regex: exactCI(username) } }
    });
 
    // Filter to only those without 'delivered' status for this user
@@ -672,6 +672,12 @@ app.use((req, res, next) => {
 });
 
 // API Key validation middleware
+// HANDLE-BIND-1: exact, case-insensitive match for user-supplied strings. Usernames may
+// contain '.' and '-'; interpolated raw into a RegExp, '.' matched any character, so a key
+// lookup for 'j.smith' could return the bundle of 'jxsmith'. Every such lookup uses this.
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const exactCI = (s) => new RegExp('^' + escapeRegex(s) + '$', 'i');
+
 const validateApiKey = (req, res, next) => {
    const authHeader = req.headers.authorization;
    
@@ -2025,7 +2031,7 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
         console.log(`DEBUG-SIGNAL: Uploading keys for ${username}, preKeys count: ${keyBundle.preKeys.length}`);
 
         // Get existing bundle for comparison
-        const existingBundle = await SignalKeyBundle.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+        const existingBundle = await SignalKeyBundle.findOne({ username: { $regex: exactCI(username) } });
 
         // Calculate new fingerprint
         const newFingerprint = calculateKeyFingerprint(keyBundle.identityKey);
@@ -2079,7 +2085,7 @@ app.post('/signal/upload-keys', validateApiKey, async (req, res) => {
 
         // Upsert the key bundle
         await SignalKeyBundle.findOneAndUpdate(
-            { username: { $regex: new RegExp(`^${username}$`, 'i') } },
+            { username: { $regex: exactCI(username) } },
             {
                 username: username,
                 registrationId: keyBundle.registrationId,
@@ -2136,7 +2142,7 @@ app.get('/signal/keys/:username', validateApiKey, async (req, res) => {
         
         // (case-insensitive) username:
         const keyBundle = await SignalKeyBundle.findOne({
-            username: { $regex: new RegExp(`^${username}$`, 'i') }
+            username: { $regex: exactCI(username) }
         });
         
         if (!keyBundle) {
@@ -2182,7 +2188,7 @@ app.delete('/signal/keys/:username', validateApiKey, async (req, res) => {
 
         // Delete using case-insensitive match
         const result = await SignalKeyBundle.findOneAndDelete({
-            username: { $regex: new RegExp(`^${username}$`, 'i') }
+            username: { $regex: exactCI(username) }
         });
 
         if (result) {
@@ -2254,7 +2260,7 @@ app.post('/account/delete-user-data', validateApiKey, async (req, res) => {
         // Users who want to remove individual FeedItems before deleting their
         // account can do so via the in-app trash icon on each item (per the
         // privacy policy).
-        const usernameRegex = new RegExp(`^${username}$`, 'i');
+        const usernameRegex = exactCI(username);
         const anonResult = await FeedItem.updateMany(
             { author: usernameRegex, isDeleted: { $ne: true } },
             { $set: { author: '[deleted]', updatedAt: new Date() } }
@@ -2390,7 +2396,7 @@ app.get('/notifications', validateApiKey, async (req, res) => {
         // return SELFHEAL control messages -- doing so made the untouched client pollNotifications treat
         // them as key-changes and delete real sessions. SELFHEAL is delivered ONLY via /selfheal (below).
         const notifications = await KeyChangeNotification.find({
-            senderUsername: { $regex: new RegExp(`^${username}$`, 'i') },
+            senderUsername: { $regex: exactCI(username) },
             type: { $ne: 'SELFHEAL' },
             status: { $in: ['pending', 'sent'] }
         }).sort({ createdAt: 1 });
@@ -2588,7 +2594,7 @@ app.get('/admin/message/:messageId', validateApiKey, async (req, res) => {
         const recipientDiagnostics = [];
         for (const recipient of (message.recipients || [])) {
             const keyBundle = await SignalKeyBundle.findOne({
-                username: { $regex: new RegExp(`^${recipient}$`, 'i') }
+                username: { $regex: exactCI(recipient) }
             });
 
             const encryptedForVersion = message.encryptedForKeyVersions?.[recipient] || 'unknown';
@@ -2648,7 +2654,7 @@ app.get('/admin/user/:username/keys', validateApiKey, async (req, res) => {
         const { username } = req.params;
 
         const keyBundle = await SignalKeyBundle.findOne({
-            username: { $regex: new RegExp(`^${username}$`, 'i') }
+            username: { $regex: exactCI(username) }
         });
 
         if (!keyBundle) {
@@ -2688,8 +2694,8 @@ app.get('/admin/user/:username/messages', validateApiKey, async (req, res) => {
         const query = {
             isDirectMessage: true,
             $or: [
-                { author: { $regex: new RegExp(`^${username}$`, 'i') } },
-                { recipients: { $elemMatch: { $regex: new RegExp(`^${username}$`, 'i') } } }
+                { author: { $regex: exactCI(username) } },
+                { recipients: { $elemMatch: { $regex: exactCI(username) } } }
             ]
         };
 
@@ -2752,7 +2758,7 @@ app.post('/admin/message/:messageId/force-reencrypt', validateApiKey, async (req
         }
 
         const keyBundle = await SignalKeyBundle.findOne({
-            username: { $regex: new RegExp(`^${recipientUsername}$`, 'i') }
+            username: { $regex: exactCI(recipientUsername) }
         });
 
         if (!keyBundle) {
@@ -2812,8 +2818,8 @@ app.get('/admin/notifications', validateApiKey, async (req, res) => {
 
         const query = {};
         if (status) query.status = status;
-        if (sender) query.senderUsername = { $regex: new RegExp(`^${sender}$`, 'i') };
-        if (recipient) query.recipientUsername = { $regex: new RegExp(`^${recipient}$`, 'i') };
+        if (sender) query.senderUsername = { $regex: exactCI(sender) };
+        if (recipient) query.recipientUsername = { $regex: exactCI(recipient) };
 
         const notifications = await KeyChangeNotification.find(query)
             .sort({ createdAt: -1 })
@@ -4265,7 +4271,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                 // Mark as deleted in MongoDB (soft delete)
                 // Case-insensitive regex match handles both uppercase and lowercase IDs
                 FeedItem.findOneAndUpdate(
-                    { id: { $regex: new RegExp(`^${deleteId}$`, 'i') } },
+                    { id: { $regex: exactCI(deleteId) } },
                     { isDeleted: true, updatedAt: new Date() },
                     { new: true }
                 ).then(deletedItem => {
