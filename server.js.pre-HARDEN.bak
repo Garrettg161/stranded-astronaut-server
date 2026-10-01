@@ -406,23 +406,11 @@ const ActiveUser = mongoose.model('ActiveUser', activeUserSchema);
 // that value WINS. The $inc exists to keep the number moving between reports.
 //
 // Per user, not per device: reading on one device clears the count everywhere.
-// COMPAT-1 (2026-10-01): autoIndex MUST be false here.
-//
-// Mongoose defaults autoIndex to true and builds a model's indexes LAZILY, on first
-// use, buffering that model's operations until the build finishes. Every other schema
-// in this file predates the current deploy, so their collections and indexes already
-// exist and the cost was paid long ago. UnreadCount was the only BRAND-NEW collection,
-// so its creation + unique-index build landed on the first DM publish after deploy --
-// exactly the "worst on the first DM after deployment, better afterwards" symptom.
-//
-// With autoIndex:false nothing is built on demand; the index is created explicitly at
-// startup, after connect, before the server handles traffic. No user request can ever
-// pay for it again, on this deploy or any future one.
 const unreadCountSchema = new mongoose.Schema({
     username:  { type: String, required: true, unique: true, index: true },
     count:     { type: Number, default: 0 },
     updatedAt: { type: Date,   default: Date.now }
-}, { autoIndex: false });
+});
 const UnreadCount = mongoose.model('UnreadCount', unreadCountSchema);
 
 // v130: Plot Analytics Schema -- anonymous org-level aggregation (no userId, no PII)
@@ -938,13 +926,6 @@ mongoose.connect(mongoUri, {
  useUnifiedTopology: true
 }).then(() => {
  console.log('Connected to MongoDB database');
-
- // COMPAT-1: build the UnreadCount index HERE, once, at startup -- never on a user
- // request. Failure is logged and ignored: a missing index makes the counter slower,
- // it must never stop the server from serving existing clients.
- UnreadCount.createIndexes()
-     .then(() => console.log('DEBUG-UNREAD: UnreadCount indexes ready'))
-     .catch(err => console.log(`DEBUG-UNREAD: index build failed (non-fatal): ${err.message}`));
 
  // Seed active users map from MongoDB (so recent users survive restarts)
  const seedCutoff = new Date(Date.now() - 60 * 1000); // last 60s
@@ -3000,60 +2981,27 @@ app.post('/feed', validateApiKey, (req, res) => {
                 // Same place and same shape as the commentCount $inc below. Failure
                 // is logged and ignored: the device's next report corrects it, and a
                 // DM must never fail to publish because a counter did not update.
-                // COMPAT-1: the ENTIRE unread block is wrapped. The $inc is already
-                // fire-and-forget with a .catch, but a SYNCHRONOUS throw here (a malformed
-                // recipients entry, a model-state error) would propagate out of the handler
-                // and 500 the DM publish. This block exists to count a badge; it must never
-                // be able to stop a message from being delivered.
-                try {
                 if (processedItem.isDirectMessage && Array.isArray(processedItem.recipients)) {
-                    // HARDEN-1 (2026-10-01): protect EXISTING users first. Three problems
-                    // with the previous form, all from using a $regex where an equality
-                    // filter belongs:
-                    //
-                    //   1. A case-insensitive regex CANNOT use the unique index on
-                    //      username, so every DM publish scanned the whole UnreadCount
-                    //      collection -- cost grows with the user base, on a hot path.
-                    //   2. forEach fired N INDEPENDENT findOneAndUpdate calls, one per
-                    //      recipient. A group DM fans out N concurrent writes competing
-                    //      for the connection pool with every other user's queries.
-                    //   3. Concurrent upserts against a unique index can throw E11000,
-                    //      silently dropping a count.
-                    //
-                    // Fix: normalize to lowercase and match by EQUALITY -- the same
-                    // normalize-then-match-exactly pattern the v143 middleware uses for
-                    // FeedItem IDs. Case-insensitivity is preserved by normalization, the
-                    // index is used, upsert populates username from the filter, and the
-                    // whole batch is ONE round trip regardless of recipient count.
-                    // ordered:false so one bad recipient cannot abort the rest.
-                    const names = [...new Set(
-                        processedItem.recipients
-                            .map(r => String(r || '').trim().toLowerCase())
-                            .filter(n => n.length > 0)
-                    )];
-                    if (names.length > 0) {
-                        UnreadCount.bulkWrite(
-                            names.map(n => ({
-                                updateOne: {
-                                    filter: { username: n },
-                                    update: {
-                                        $inc: { count: 1 },
-                                        $set: { updatedAt: new Date() },
-                                        $setOnInsert: { username: n }
-                                    },
-                                    upsert: true
-                                }
-                            })),
-                            { ordered: false }
-                        ).then(r => {
-                            console.log(`DEBUG-UNREAD: bumped ${names.length} recipient(s) -- matched=${r.matchedCount} upserted=${r.upsertedCount}`);
+                    processedItem.recipients.forEach(recipient => {
+                        const name = String(recipient || '').trim();
+                        if (!name) { return; }
+                        UnreadCount.findOneAndUpdate(
+                            { username: { $regex: exactCI(name) } },
+                            // AMEND-1: username MUST be in the $set. On upsert MongoDB
+                            // populates the new document from equality conditions in the
+                            // filter, and a $regex is not one -- so without this the
+                            // document is created without a username, the schema's
+                            // required:true fails validation, and the count stays 0 until
+                            // the device POSTs. $setOnInsert is not used because the
+                            // regex filter already guarantees we matched this user.
+                            { $inc: { count: 1 }, $set: { username: name, updatedAt: new Date() } },
+                            { new: true, upsert: true }
+                        ).then(doc => {
+                            console.log(`DEBUG-UNREAD: ${name} -> ${doc ? doc.count : '?'}`);
                         }).catch(err => {
-                            console.log(`DEBUG-UNREAD: bulk increment failed: ${err.message}`);
+                            console.log(`DEBUG-UNREAD: increment failed for ${name}: ${err.message}`);
                         });
-                    }
-                }
-                } catch (unreadErr) {
-                    console.log(`DEBUG-UNREAD: counter skipped (non-fatal): ${unreadErr.message}`);
+                    });
                 }
 
                 // CRITICAL FIX: Ensure parentId is correctly preserved
@@ -3085,15 +3033,10 @@ app.post('/feed', validateApiKey, (req, res) => {
                         { new: true }
                     ).then(byId => {
                         if (byId) { return byId; }
-                        // HARDEN-1: /debug/duplicates reports 4 feedItemIDs carried by more
-                        // than one item (1735 x3, 1782, 2225, 2575 x2). Without a sort,
-                        // findOneAndUpdate takes an ARBITRARY one of them. Sorting by
-                        // updatedAt makes the winner deterministic and picks the live item
-                        // rather than a stale duplicate.
                         return FeedItem.findOneAndUpdate(
                             { feedItemID: parentKey },
                             { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
-                            { new: true, sort: { updatedAt: -1 } }
+                            { new: true }
                         );
                     }).then(updatedParent => {
                         if (updatedParent) {
@@ -4550,16 +4493,14 @@ app.post('/feed', validateApiKey, (req, res) => {
 // request is lost, while a reported total is idempotent and self-correcting.
 app.post('/api/unread/:username', validateApiKey, async (req, res) => {
     try {
-        // HARDEN-1: lowercase + equality, matching the publish path. Indexed, and the
-        // stored case can never diverge from what the $inc looks up.
-        const name = String(req.params.username || '').trim().toLowerCase();
+        const name = String(req.params.username || '').trim();
         const count = Math.max(0, parseInt(req.body.count, 10) || 0);
         if (!name) {
             return res.status(400).json({ success: false, error: 'Missing username' });
         }
         const doc = await UnreadCount.findOneAndUpdate(
-            { username: name },
-            { $set: { count: count, updatedAt: new Date() }, $setOnInsert: { username: name } },
+            { username: { $regex: exactCI(name) } },
+            { $set: { username: name, count: count, updatedAt: new Date() } },
             { new: true, upsert: true }
         );
         console.log(`DEBUG-UNREAD: ${name} reported ${doc.count}`);
@@ -4572,9 +4513,8 @@ app.post('/api/unread/:username', validateApiKey, async (req, res) => {
 
 app.get('/api/unread/:username', validateApiKey, async (req, res) => {
     try {
-        // HARDEN-1: lowercase + equality (indexed), same as the write paths.
-        const name = String(req.params.username || '').trim().toLowerCase();
-        const doc = await UnreadCount.findOne({ username: name });
+        const name = String(req.params.username || '').trim();
+        const doc = await UnreadCount.findOne({ username: { $regex: exactCI(name) } });
         res.json({ success: true, count: doc ? doc.count : 0 });
     } catch (error) {
         res.status(500).json({ success: false, error: 'Internal server error' });

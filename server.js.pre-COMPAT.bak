@@ -406,23 +406,11 @@ const ActiveUser = mongoose.model('ActiveUser', activeUserSchema);
 // that value WINS. The $inc exists to keep the number moving between reports.
 //
 // Per user, not per device: reading on one device clears the count everywhere.
-// COMPAT-1 (2026-10-01): autoIndex MUST be false here.
-//
-// Mongoose defaults autoIndex to true and builds a model's indexes LAZILY, on first
-// use, buffering that model's operations until the build finishes. Every other schema
-// in this file predates the current deploy, so their collections and indexes already
-// exist and the cost was paid long ago. UnreadCount was the only BRAND-NEW collection,
-// so its creation + unique-index build landed on the first DM publish after deploy --
-// exactly the "worst on the first DM after deployment, better afterwards" symptom.
-//
-// With autoIndex:false nothing is built on demand; the index is created explicitly at
-// startup, after connect, before the server handles traffic. No user request can ever
-// pay for it again, on this deploy or any future one.
 const unreadCountSchema = new mongoose.Schema({
     username:  { type: String, required: true, unique: true, index: true },
     count:     { type: Number, default: 0 },
     updatedAt: { type: Date,   default: Date.now }
-}, { autoIndex: false });
+});
 const UnreadCount = mongoose.model('UnreadCount', unreadCountSchema);
 
 // v130: Plot Analytics Schema -- anonymous org-level aggregation (no userId, no PII)
@@ -938,13 +926,6 @@ mongoose.connect(mongoUri, {
  useUnifiedTopology: true
 }).then(() => {
  console.log('Connected to MongoDB database');
-
- // COMPAT-1: build the UnreadCount index HERE, once, at startup -- never on a user
- // request. Failure is logged and ignored: a missing index makes the counter slower,
- // it must never stop the server from serving existing clients.
- UnreadCount.createIndexes()
-     .then(() => console.log('DEBUG-UNREAD: UnreadCount indexes ready'))
-     .catch(err => console.log(`DEBUG-UNREAD: index build failed (non-fatal): ${err.message}`));
 
  // Seed active users map from MongoDB (so recent users survive restarts)
  const seedCutoff = new Date(Date.now() - 60 * 1000); // last 60s
@@ -3000,12 +2981,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                 // Same place and same shape as the commentCount $inc below. Failure
                 // is logged and ignored: the device's next report corrects it, and a
                 // DM must never fail to publish because a counter did not update.
-                // COMPAT-1: the ENTIRE unread block is wrapped. The $inc is already
-                // fire-and-forget with a .catch, but a SYNCHRONOUS throw here (a malformed
-                // recipients entry, a model-state error) would propagate out of the handler
-                // and 500 the DM publish. This block exists to count a badge; it must never
-                // be able to stop a message from being delivered.
-                try {
                 if (processedItem.isDirectMessage && Array.isArray(processedItem.recipients)) {
                     // HARDEN-1 (2026-10-01): protect EXISTING users first. Three problems
                     // with the previous form, all from using a $regex where an equality
@@ -3051,9 +3026,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                             console.log(`DEBUG-UNREAD: bulk increment failed: ${err.message}`);
                         });
                     }
-                }
-                } catch (unreadErr) {
-                    console.log(`DEBUG-UNREAD: counter skipped (non-fatal): ${unreadErr.message}`);
                 }
 
                 // CRITICAL FIX: Ensure parentId is correctly preserved
