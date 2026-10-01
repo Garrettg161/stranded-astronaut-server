@@ -2987,14 +2987,7 @@ app.post('/feed', validateApiKey, (req, res) => {
                         if (!name) { return; }
                         UnreadCount.findOneAndUpdate(
                             { username: { $regex: exactCI(name) } },
-                            // AMEND-1: username MUST be in the $set. On upsert MongoDB
-                            // populates the new document from equality conditions in the
-                            // filter, and a $regex is not one -- so without this the
-                            // document is created without a username, the schema's
-                            // required:true fails validation, and the count stays 0 until
-                            // the device POSTs. $setOnInsert is not used because the
-                            // regex filter already guarantees we matched this user.
-                            { $inc: { count: 1 }, $set: { username: name, updatedAt: new Date() } },
+                            { $inc: { count: 1 }, $set: { updatedAt: new Date() } },
                             { new: true, upsert: true }
                         ).then(doc => {
                             console.log(`DEBUG-UNREAD: ${name} -> ${doc ? doc.count : '?'}`);
@@ -3015,48 +3008,26 @@ app.post('/feed', validateApiKey, (req, res) => {
                     // COMMENT-COUNT-1 (2026-09-30): match EITHER id or feedItemID.
                     // The client sends the stable feedItemID (CommentView.swift:522,
                     // build v13) because id is re-minted on every refresh for non-UUID
-                    // server ids. The original query matched only id, so for any item
-                    // where the two differ the $inc silently hit nothing and the badge
-                    // stayed 0.
-                    //
-                    // AMEND-1: two exact lookups, id first, instead of one $or of
-                    // case-insensitive regexes. A case-insensitive regex cannot use a
-                    // B-tree index, so the regex form scanned the whole feed collection
-                    // on every comment; both fields are indexed (:196, :350) and this
-                    // form uses them. It is also unambiguous -- an $or takes the FIRST
-                    // match, so if one item's id equals another item's feedItemID the
-                    // wrong parent could be incremented. id wins here, by construction.
-                    const parentKey = String(feedItem.parentId).toLowerCase();   // v143 rule: FeedItem IDs are lowercase everywhere
+                    // server ids. This query matched only id, so for any item where the
+                    // two differ the $inc silently hit nothing and the badge stayed 0.
                     FeedItem.findOneAndUpdate(
-                        { id: parentKey },
+                        { $or: [
+                            { id: { $regex: exactCI(String(feedItem.parentId)) } },
+                            { feedItemID: { $regex: exactCI(String(feedItem.parentId)) } }
+                        ] },
                         { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
                         { new: true }
-                    ).then(byId => {
-                        if (byId) { return byId; }
-                        return FeedItem.findOneAndUpdate(
-                            { feedItemID: parentKey },
-                            { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
-                            { new: true }
-                        );
-                    }).then(updatedParent => {
+                    ).then(updatedParent => {
                         if (updatedParent) {
                             console.log(`DEBUG-COMMENT-SERVER: Updated parent in DB with comment count: ${updatedParent.commentCount}`);
                             
                             // Also update parent in memory
                             // FIXED: Look up parent by id instead of feedItemID
-                            // AMEND-1: id FIRST, then feedItemID -- same precedence as the
-                            // DB lookup. CASE-INSENSITIVE, per the v143 rule that every
-                            // FeedItem ID is lowercase on the wire and in storage: the key
-                            // is lowercased above, and both sides are lowercased here so
-                            // legacy rows written before the v143 migration still match.
-                            let parentIndex = global.allFeedItems.findIndex(item =>
-                                String(item.id).toLowerCase() === parentKey
+                            // COMMENT-COUNT-1: same either-field match as the query above.
+                            const parentIndex = global.allFeedItems.findIndex(item =>
+                                String(item.id).toLowerCase() === String(feedItem.parentId).toLowerCase() ||
+                                String(item.feedItemID || '').toLowerCase() === String(feedItem.parentId).toLowerCase()
                             );
-                            if (parentIndex === -1) {
-                                parentIndex = global.allFeedItems.findIndex(item =>
-                                    String(item.feedItemID || '').toLowerCase() === parentKey
-                                );
-                            }
                             
                             if (parentIndex !== -1) {
                                 global.allFeedItems[parentIndex].commentCount = updatedParent.commentCount;
@@ -3068,16 +3039,11 @@ app.post('/feed', validateApiKey, (req, res) => {
                         
                         // Fall back to memory-only update if DB fails
                         // FIXED: Look up parent by id instead of feedItemID
-                        // AMEND-1: same case-insensitive, id-first order as above
-                        // (DB-failure fallback).
-                        let parentIndex = global.allFeedItems.findIndex(item =>
-                            String(item.id).toLowerCase() === parentKey
+                        // COMMENT-COUNT-1: same either-field match (DB-failure fallback).
+                        const parentIndex = global.allFeedItems.findIndex(item =>
+                            String(item.id).toLowerCase() === String(feedItem.parentId).toLowerCase() ||
+                            String(item.feedItemID || '').toLowerCase() === String(feedItem.parentId).toLowerCase()
                         );
-                        if (parentIndex === -1) {
-                            parentIndex = global.allFeedItems.findIndex(item =>
-                                String(item.feedItemID || '').toLowerCase() === parentKey
-                            );
-                        }
                         
                         if (parentIndex !== -1) {
                             if (!global.allFeedItems[parentIndex].commentCount) {

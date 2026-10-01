@@ -397,22 +397,6 @@ const activeUserSchema = new mongoose.Schema({
 activeUserSchema.index({ lastSeen: 1 }, { expireAfterSeconds: 86400 });
 const ActiveUser = mongoose.model('ActiveUser', activeUserSchema);
 
-// UNREAD-1 (2026-09-30): per-user unread DM count. Mirrors the commentCount
-// pattern -- a number on a document, bumped with $inc when the event happens.
-//
-// The server can only count one half of this. It knows a DM was delivered; it
-// cannot know what the recipient has read, because read state lives on the
-// device and never leaves it. So the device reports its authoritative total and
-// that value WINS. The $inc exists to keep the number moving between reports.
-//
-// Per user, not per device: reading on one device clears the count everywhere.
-const unreadCountSchema = new mongoose.Schema({
-    username:  { type: String, required: true, unique: true, index: true },
-    count:     { type: Number, default: 0 },
-    updatedAt: { type: Date,   default: Date.now }
-});
-const UnreadCount = mongoose.model('UnreadCount', unreadCountSchema);
-
 // v130: Plot Analytics Schema -- anonymous org-level aggregation (no userId, no PII)
 const plotAnalyticsSummarySchema = new mongoose.Schema({
     orgId:          { type: String, required: true },
@@ -2977,33 +2961,6 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.id = assignedId;
                 }
 
-                // UNREAD-1: a DM was just published. Bump every recipient's count.
-                // Same place and same shape as the commentCount $inc below. Failure
-                // is logged and ignored: the device's next report corrects it, and a
-                // DM must never fail to publish because a counter did not update.
-                if (processedItem.isDirectMessage && Array.isArray(processedItem.recipients)) {
-                    processedItem.recipients.forEach(recipient => {
-                        const name = String(recipient || '').trim();
-                        if (!name) { return; }
-                        UnreadCount.findOneAndUpdate(
-                            { username: { $regex: exactCI(name) } },
-                            // AMEND-1: username MUST be in the $set. On upsert MongoDB
-                            // populates the new document from equality conditions in the
-                            // filter, and a $regex is not one -- so without this the
-                            // document is created without a username, the schema's
-                            // required:true fails validation, and the count stays 0 until
-                            // the device POSTs. $setOnInsert is not used because the
-                            // regex filter already guarantees we matched this user.
-                            { $inc: { count: 1 }, $set: { username: name, updatedAt: new Date() } },
-                            { new: true, upsert: true }
-                        ).then(doc => {
-                            console.log(`DEBUG-UNREAD: ${name} -> ${doc ? doc.count : '?'}`);
-                        }).catch(err => {
-                            console.log(`DEBUG-UNREAD: increment failed for ${name}: ${err.message}`);
-                        });
-                    });
-                }
-
                 // CRITICAL FIX: Ensure parentId is correctly preserved
                 if (feedItem.parentId) {
                     // Always store parentId as received without modification
@@ -3012,51 +2969,19 @@ app.post('/feed', validateApiKey, (req, res) => {
                     
                     // Update parent's comment count in MongoDB first
                     // FIXED: Look up parent by id instead of feedItemID
-                    // COMMENT-COUNT-1 (2026-09-30): match EITHER id or feedItemID.
-                    // The client sends the stable feedItemID (CommentView.swift:522,
-                    // build v13) because id is re-minted on every refresh for non-UUID
-                    // server ids. The original query matched only id, so for any item
-                    // where the two differ the $inc silently hit nothing and the badge
-                    // stayed 0.
-                    //
-                    // AMEND-1: two exact lookups, id first, instead of one $or of
-                    // case-insensitive regexes. A case-insensitive regex cannot use a
-                    // B-tree index, so the regex form scanned the whole feed collection
-                    // on every comment; both fields are indexed (:196, :350) and this
-                    // form uses them. It is also unambiguous -- an $or takes the FIRST
-                    // match, so if one item's id equals another item's feedItemID the
-                    // wrong parent could be incremented. id wins here, by construction.
-                    const parentKey = String(feedItem.parentId).toLowerCase();   // v143 rule: FeedItem IDs are lowercase everywhere
                     FeedItem.findOneAndUpdate(
-                        { id: parentKey },
+                        { id: String(feedItem.parentId) },  // Changed from feedItemID to id
                         { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
                         { new: true }
-                    ).then(byId => {
-                        if (byId) { return byId; }
-                        return FeedItem.findOneAndUpdate(
-                            { feedItemID: parentKey },
-                            { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
-                            { new: true }
-                        );
-                    }).then(updatedParent => {
+                    ).then(updatedParent => {
                         if (updatedParent) {
                             console.log(`DEBUG-COMMENT-SERVER: Updated parent in DB with comment count: ${updatedParent.commentCount}`);
                             
                             // Also update parent in memory
                             // FIXED: Look up parent by id instead of feedItemID
-                            // AMEND-1: id FIRST, then feedItemID -- same precedence as the
-                            // DB lookup. CASE-INSENSITIVE, per the v143 rule that every
-                            // FeedItem ID is lowercase on the wire and in storage: the key
-                            // is lowercased above, and both sides are lowercased here so
-                            // legacy rows written before the v143 migration still match.
-                            let parentIndex = global.allFeedItems.findIndex(item =>
-                                String(item.id).toLowerCase() === parentKey
+                            const parentIndex = global.allFeedItems.findIndex(item =>
+                                String(item.id) === String(feedItem.parentId)  // Changed from feedItemID to id
                             );
-                            if (parentIndex === -1) {
-                                parentIndex = global.allFeedItems.findIndex(item =>
-                                    String(item.feedItemID || '').toLowerCase() === parentKey
-                                );
-                            }
                             
                             if (parentIndex !== -1) {
                                 global.allFeedItems[parentIndex].commentCount = updatedParent.commentCount;
@@ -3068,16 +2993,9 @@ app.post('/feed', validateApiKey, (req, res) => {
                         
                         // Fall back to memory-only update if DB fails
                         // FIXED: Look up parent by id instead of feedItemID
-                        // AMEND-1: same case-insensitive, id-first order as above
-                        // (DB-failure fallback).
-                        let parentIndex = global.allFeedItems.findIndex(item =>
-                            String(item.id).toLowerCase() === parentKey
+                        const parentIndex = global.allFeedItems.findIndex(item =>
+                            String(item.id) === String(feedItem.parentId)  // Changed from feedItemID to id
                         );
-                        if (parentIndex === -1) {
-                            parentIndex = global.allFeedItems.findIndex(item =>
-                                String(item.feedItemID || '').toLowerCase() === parentKey
-                            );
-                        }
                         
                         if (parentIndex !== -1) {
                             if (!global.allFeedItems[parentIndex].commentCount) {
@@ -4488,39 +4406,6 @@ app.post('/feed', validateApiKey, (req, res) => {
 });
 
 // Get players in a session
-// UNREAD-1: the device's count is authoritative. This SETS rather than
-// decrements, deliberately -- a decrement API drifts permanently the first time a
-// request is lost, while a reported total is idempotent and self-correcting.
-app.post('/api/unread/:username', validateApiKey, async (req, res) => {
-    try {
-        const name = String(req.params.username || '').trim();
-        const count = Math.max(0, parseInt(req.body.count, 10) || 0);
-        if (!name) {
-            return res.status(400).json({ success: false, error: 'Missing username' });
-        }
-        const doc = await UnreadCount.findOneAndUpdate(
-            { username: { $regex: exactCI(name) } },
-            { $set: { username: name, count: count, updatedAt: new Date() } },
-            { new: true, upsert: true }
-        );
-        console.log(`DEBUG-UNREAD: ${name} reported ${doc.count}`);
-        res.json({ success: true, count: doc.count });
-    } catch (error) {
-        console.log(`DEBUG-UNREAD: report failed: ${error.message}`);
-        res.status(500).json({ success: false, error: 'Internal server error' });
-    }
-});
-
-app.get('/api/unread/:username', validateApiKey, async (req, res) => {
-    try {
-        const name = String(req.params.username || '').trim();
-        const doc = await UnreadCount.findOne({ username: { $regex: exactCI(name) } });
-        res.json({ success: true, count: doc ? doc.count : 0 });
-    } catch (error) {
-        res.status(500).json({ success: false, error: 'Internal server error' });
-    }
-});
-
 app.get('/players', validateApiKey, (req, res) => {
     const { sessionId } = req.query;
     
