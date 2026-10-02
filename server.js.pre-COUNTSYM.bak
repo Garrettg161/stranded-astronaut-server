@@ -533,64 +533,6 @@ async function queueKeyChangeNotifications(username, oldKeyVersion, newKeyVersio
    }
 }
 
-// ---------------------------------------------------------------------------
-// COUNT-SYM (2026-10-02): the ONE place a parent's commentCount moves.
-//
-// Both the publish path (+1) and the delete path (-1) call this, so they can
-// never drift apart again. They already had: COMMENT-COUNT-1/AMEND-1 fixed the
-// parent lookup on the INCREMENT side (id first, then feedItemID, lowercased,
-// duplicates resolved by updatedAt) and left the DECREMENT side matching
-// { id: String(deletedItem.parentId) } -- id only, case-sensitive. The client
-// sends the stable feedItemID as parentId (CommentView.swift:522), so deleting a
-// comment on any parent addressed by its numeric feedItemID silently decremented
-// nothing and the count drifted upward forever. Caught live 2026-10-02: deleted
-// the only comment on feedItemID 6404 and its commentCount stayed at 1.
-//
-// Resolution order is id FIRST, then feedItemID: id wins by construction, so an
-// item whose id happens to equal another item's feedItemID cannot steal the
-// update. Both match by EQUALITY on a lowercased key -- FeedItem IDs are
-// lowercase everywhere (v143), and a case-insensitive regex cannot use the
-// indexes at :196/:350. feedItemID is sorted updatedAt desc because
-// /debug/duplicates reports four feedItemIDs carried by more than one item.
-// ---------------------------------------------------------------------------
-function adjustParentCommentCount(parentId, delta) {
-    const key = String(parentId == null ? '' : parentId).trim().toLowerCase();
-    if (!key) return Promise.resolve(null);
-    const update = { $inc: { commentCount: delta }, $set: { updatedAt: new Date() } };
-
-    return FeedItem.findOneAndUpdate({ id: key }, update, { new: true })
-        .then(byId => byId || FeedItem.findOneAndUpdate(
-            { feedItemID: key }, update, { new: true, sort: { updatedAt: -1 } }))
-        .then(parent => {
-            if (!parent) {
-                console.log(`DEBUG-COMMENT-SERVER: no parent matched '${key}' (delta ${delta})`);
-                return null;
-            }
-            // Floor at 0 -- historical drift must never show a negative badge.
-            if ((parent.commentCount || 0) < 0) {
-                return FeedItem.findOneAndUpdate(
-                    { _id: parent._id }, { $set: { commentCount: 0 } }, { new: true });
-            }
-            return parent;
-        })
-        .then(parent => {
-            if (!parent) return null;
-            const count = Math.max(0, parent.commentCount || 0);
-            // Mirror into the in-memory feed, same id-first order, both sides lowercased.
-            let idx = global.allFeedItems.findIndex(i => String(i.id || '').toLowerCase() === key);
-            if (idx === -1) {
-                idx = global.allFeedItems.findIndex(i => String(i.feedItemID || '').toLowerCase() === key);
-            }
-            if (idx !== -1) global.allFeedItems[idx].commentCount = count;
-            console.log(`DEBUG-COMMENT-SERVER: parent '${key}' commentCount -> ${count} (delta ${delta})`);
-            return parent;
-        })
-        .catch(err => {
-            console.error(`DEBUG-COMMENT-SERVER: adjustParentCommentCount('${key}', ${delta}) failed: ${err.message}`);
-            return null;
-        });
-}
-
 // Function to load items from MongoDB at startup
 function loadItemsFromDatabase() {
    return new Promise((resolve, reject) => {
@@ -3120,12 +3062,89 @@ app.post('/feed', validateApiKey, (req, res) => {
                     processedItem.parentId = feedItem.parentId;
                     console.log(`DEBUG-COMMENT-SERVER: Item is a comment with parentId: ${feedItem.parentId}`);
                     
-                    // COUNT-SYM: the parent lookup (id first, then feedItemID, lowercased,
-                    // duplicates resolved by updatedAt) and the in-memory mirror now live in
-                    // adjustParentCommentCount(). The delete path calls the SAME helper with
-                    // -1, which is the whole point -- it used to carry its own id-only,
-                    // case-sensitive copy and silently never decremented.
-                    adjustParentCommentCount(feedItem.parentId, +1);
+                    // Update parent's comment count in MongoDB first
+                    // FIXED: Look up parent by id instead of feedItemID
+                    // COMMENT-COUNT-1 (2026-09-30): match EITHER id or feedItemID.
+                    // The client sends the stable feedItemID (CommentView.swift:522,
+                    // build v13) because id is re-minted on every refresh for non-UUID
+                    // server ids. The original query matched only id, so for any item
+                    // where the two differ the $inc silently hit nothing and the badge
+                    // stayed 0.
+                    //
+                    // AMEND-1: two exact lookups, id first, instead of one $or of
+                    // case-insensitive regexes. A case-insensitive regex cannot use a
+                    // B-tree index, so the regex form scanned the whole feed collection
+                    // on every comment; both fields are indexed (:196, :350) and this
+                    // form uses them. It is also unambiguous -- an $or takes the FIRST
+                    // match, so if one item's id equals another item's feedItemID the
+                    // wrong parent could be incremented. id wins here, by construction.
+                    const parentKey = String(feedItem.parentId).toLowerCase();   // v143 rule: FeedItem IDs are lowercase everywhere
+                    FeedItem.findOneAndUpdate(
+                        { id: parentKey },
+                        { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
+                        { new: true }
+                    ).then(byId => {
+                        if (byId) { return byId; }
+                        // HARDEN-1: /debug/duplicates reports 4 feedItemIDs carried by more
+                        // than one item (1735 x3, 1782, 2225, 2575 x2). Without a sort,
+                        // findOneAndUpdate takes an ARBITRARY one of them. Sorting by
+                        // updatedAt makes the winner deterministic and picks the live item
+                        // rather than a stale duplicate.
+                        return FeedItem.findOneAndUpdate(
+                            { feedItemID: parentKey },
+                            { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
+                            { new: true, sort: { updatedAt: -1 } }
+                        );
+                    }).then(updatedParent => {
+                        if (updatedParent) {
+                            console.log(`DEBUG-COMMENT-SERVER: Updated parent in DB with comment count: ${updatedParent.commentCount}`);
+                            
+                            // Also update parent in memory
+                            // FIXED: Look up parent by id instead of feedItemID
+                            // AMEND-1: id FIRST, then feedItemID -- same precedence as the
+                            // DB lookup. CASE-INSENSITIVE, per the v143 rule that every
+                            // FeedItem ID is lowercase on the wire and in storage: the key
+                            // is lowercased above, and both sides are lowercased here so
+                            // legacy rows written before the v143 migration still match.
+                            let parentIndex = global.allFeedItems.findIndex(item =>
+                                String(item.id).toLowerCase() === parentKey
+                            );
+                            if (parentIndex === -1) {
+                                parentIndex = global.allFeedItems.findIndex(item =>
+                                    String(item.feedItemID || '').toLowerCase() === parentKey
+                                );
+                            }
+                            
+                            if (parentIndex !== -1) {
+                                global.allFeedItems[parentIndex].commentCount = updatedParent.commentCount;
+                                console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory with count: ${updatedParent.commentCount}`);
+                            }
+                        }
+                    }).catch(err => {
+                        console.error(`DEBUG-COMMENT-SERVER: Error updating parent comment count: ${err}`);
+                        
+                        // Fall back to memory-only update if DB fails
+                        // FIXED: Look up parent by id instead of feedItemID
+                        // AMEND-1: same case-insensitive, id-first order as above
+                        // (DB-failure fallback).
+                        let parentIndex = global.allFeedItems.findIndex(item =>
+                            String(item.id).toLowerCase() === parentKey
+                        );
+                        if (parentIndex === -1) {
+                            parentIndex = global.allFeedItems.findIndex(item =>
+                                String(item.feedItemID || '').toLowerCase() === parentKey
+                            );
+                        }
+                        
+                        if (parentIndex !== -1) {
+                            if (!global.allFeedItems[parentIndex].commentCount) {
+                                global.allFeedItems[parentIndex].commentCount = 0;
+                            }
+                            global.allFeedItems[parentIndex].commentCount += 1;
+                            global.allFeedItems[parentIndex].updatedAt = new Date();
+                            console.log(`DEBUG-COMMENT-SERVER: Updated parent in memory only with count: ${global.allFeedItems[parentIndex].commentCount}`);
+                        }
+                    });
                 }
                 
                 // v4.6: Check for ID collision before saving -- archive existing item if found
@@ -4405,11 +4424,30 @@ app.post('/feed', validateApiKey, (req, res) => {
                         // a count higher than the actual comments. Mirrors the
                         // existing $inc on comment publish at line 2533.
                         if (deletedItem.parentId) {
-                            // COUNT-SYM: same helper as the publish path, delta -1.
-                            // Was `{ id: String(deletedItem.parentId) }` -- id only and
-                            // case-sensitive -- so a parent addressed by numeric feedItemID
-                            // never decremented and counts drifted upward forever.
-                            adjustParentCommentCount(deletedItem.parentId, -1);
+                            FeedItem.findOneAndUpdate(
+                                { id: String(deletedItem.parentId) },
+                                { $inc: { commentCount: -1 }, $set: { updatedAt: new Date() } },
+                                { new: true }
+                            ).then(updatedParent => {
+                                if (updatedParent) {
+                                    // Floor at 0 in case of any historical drift
+                                    if (updatedParent.commentCount < 0) {
+                                        FeedItem.findOneAndUpdate(
+                                            { id: String(deletedItem.parentId) },
+                                            { $set: { commentCount: 0 } }
+                                        ).exec();
+                                    }
+                                    console.log(`DEBUG-COMMENT-SERVER: Decremented parent commentCount to ${Math.max(0, updatedParent.commentCount)}`);
+                                    const parentIndex = global.allFeedItems.findIndex(item =>
+                                        String(item.id) === String(deletedItem.parentId)
+                                    );
+                                    if (parentIndex !== -1) {
+                                        global.allFeedItems[parentIndex].commentCount = Math.max(0, updatedParent.commentCount);
+                                    }
+                                }
+                            }).catch(err => {
+                                console.error(`DEBUG-COMMENT-SERVER: Error decrementing parent commentCount: ${err}`);
+                            });
                         }
 
                         // Remove from global array (case-insensitive)
