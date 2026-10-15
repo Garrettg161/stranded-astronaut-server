@@ -764,6 +764,93 @@ app.use((req, res, next) => {
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const exactCI = (s) => new RegExp('^' + escapeRegex(s) + '$', 'i');
 
+// ============================================================================
+// GROUP-DELIVERY-1 (2026-10-15) -- SHADOW MODE: changes nothing yet.
+//
+// WHY. /sync and /feed action 'get' return every feed item to every
+// authenticated client, with no participant filter. Measured 2026-10-15 with a
+// brand-new throwaway user in no groups and no conversations: 930 items, of
+// which 566 isDirectMessage and 120 carried a groupId, including the full
+// rosters of a dozen private groups (e.g. 1.25(3) -> Hamilton, Hancock,
+// Jefferson, Paine). Message BODIES stay safe -- they are Signal-encrypted per
+// recipient. MEMBERSHIP does not.
+//
+// Consequence on iOS: FeedSyncAdapter registers a group from any item carrying
+// a groupId, and InboxManager renders every registered group as an openable,
+// postable thread. So an uninvited user's device joins and displays the group.
+// Confirmed on a live device: Jefferson shows "Android Improvements 3", whose
+// server-side roster is [adams, george, hamilton, hancock, paine, qatester3601]
+// -- Jefferson is not in it. An outside user reached a test group this way and
+// posted in it.
+//
+// The right filter ALREADY EXISTS in this file: the dedicated DM queries at the
+// /feed directMessage and getUserDMs paths use
+//     recipients: { $elemMatch: { $regex: exactCI(username) } }
+// This generalises that to the two bulk feed paths that never adopted it.
+//
+// SHADOW MODE. With FEED_DELIVERY_ENFORCE=false, applyDeliveryFilter computes
+// the decision, logs what it WOULD drop, and returns the array UNCHANGED. That
+// lets the predicate be validated against live traffic at zero risk before it
+// gates delivery. Flip the one flag to enforce.
+// ============================================================================
+const FEED_DELIVERY_ENFORCE = false;   // <-- flip to true to actually filter
+
+// A DM or group item is deliverable only to its participants. Public feed items
+// are unaffected. exactCI is anchored ('^...$', case-insensitive), so 'don'
+// cannot match 'donald'.
+// `re` is COMPILED ONCE BY THE CALLER and passed in. It used to be built inside this
+// function, which meant one RegExp construction per item -- ~930 per sync request, per
+// device, every 10 seconds. Correct but wasteful; hoisted before first deploy.
+const canDeliver = (item, re) => {
+    if (!item) return true;
+    const isPrivate = item.isDirectMessage === true ||
+                      (item.groupId != null && item.groupId !== '');
+    if (!isPrivate) return true;               // public feed item -> everyone
+    if (item.author && re.test(item.author)) return true;
+    if (Array.isArray(item.recipients) && item.recipients.some(r => r && re.test(r))) return true;
+    // Multi-recipient payload keys are the most reliable roster signal, and are
+    // present on legacy items whose `recipients` array was never populated.
+    const perRecip = item.encryptedDataPerRecipient;
+    if (perRecip && typeof perRecip === 'object' &&
+        Object.keys(perRecip).some(k => re.test(k))) return true;
+    return false;
+};
+
+const applyDeliveryFilter = (items, username, site) => {
+    if (!Array.isArray(items)) return items;
+    // FAIL OPEN on a missing username: a client that does not send one keeps
+    // today's behaviour rather than losing its own DMs. Logged so the size of
+    // that population can be measured and the fallback retired.
+    if (!username || username === 'Anonymous') {
+        console.log(`DEBUG-DELIVERY-SHADOW: ${site} -- no username on request, not filtering (${items.length} items)`);
+        return items;
+    }
+    // Compile the anchored username regex ONCE for the whole array (see canDeliver).
+    // Guard against a non-string username reaching escapeRegex and throwing inside a
+    // response path -- a throw here would 500 the sync for that client.
+    let re;
+    try {
+        re = exactCI(String(username));
+    } catch (e) {
+        console.log(`DEBUG-DELIVERY-SHADOW: ${site} -- could not build matcher for username, not filtering: ${e}`);
+        return items;
+    }
+    const kept = [], dropped = [];
+    for (const it of items) (canDeliver(it, re) ? kept : dropped).push(it);
+    if (dropped.length > 0) {
+        const dms = dropped.filter(i => i.isDirectMessage === true).length;
+        const grp = dropped.filter(i => i.groupId != null && i.groupId !== '').length;
+        const names = [...new Set(dropped.map(i => i.groupName).filter(Boolean))].slice(0, 12);
+        console.log(`DEBUG-DELIVERY-SHADOW: ${site} user='${username}' total=${items.length} ` +
+                    `wouldDrop=${dropped.length} (dm=${dms} group=${grp}) keep=${kept.length} ` +
+                    `enforce=${FEED_DELIVERY_ENFORCE}`);
+        if (names.length) {
+            console.log(`DEBUG-DELIVERY-SHADOW: ${site} groups not belonging to '${username}': ${names.join(' | ')}`);
+        }
+    }
+    return FEED_DELIVERY_ENFORCE ? kept : items;
+};
+
 const validateApiKey = (req, res, next) => {
    const authHeader = req.headers.authorization;
    
@@ -1794,7 +1881,8 @@ app.post('/sync', validateApiKey, (req, res) => {
         timeElapsed: gameSessions[sessionId].timeElapsed || "1h 0m",
         preserveClientState: true,  // Always tell client to preserve its own state
         plotQuestions: gameSessions[sessionId].plotQuestions || {},  // Include plot questions in sync
-        feedItems: feedItemsToSend || [],  // Send feed items to client
+        // GROUP-DELIVERY-1: shadow-mode participant filter (no-op until FEED_DELIVERY_ENFORCE)
+        feedItems: applyDeliveryFilter(feedItemsToSend || [], req.body.username, '/sync'),
         serverInfo: {
             mediaSupport: true,  // Indicate that server supports media content
             maxMediaSize: MAX_MEDIA_SIZE,  // Inform client about max media size
@@ -3782,13 +3870,14 @@ app.post('/feed', validateApiKey, (req, res) => {
                 .then(items => {
                     console.log(`DEBUG-SYNC-SERVER: Delta sync returning ${items.length} changed items (since ${sinceDate.toISOString()})`);
 
-                    const itemsForTransmission = items.map(item => {
+                    // GROUP-DELIVERY-1: shadow-mode participant filter (delta branch)
+                    const itemsForTransmission = applyDeliveryFilter(items.map(item => {
                         const itemObj = item.toObject();
                         if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
                             itemObj.encryptedData = itemObj.encryptedData.toString('base64');
                         }
                         return itemObj;
-                    });
+                    }), req.body.username, '/feed get delta');
 
                     // 2026-04-24: Include tombstones in delta response if client requested them.
                     // This covers items deleted BEFORE the client's sinceTimestamp that still
@@ -3844,13 +3933,14 @@ app.post('/feed', validateApiKey, (req, res) => {
                     FeedItem.find({ isDeleted: false })
                         .select('-attributedContentData -imageData -videoData -audioData')
                         .then(allItems => {
-                            const itemsForTransmission = allItems.map(item => {
+                            // GROUP-DELIVERY-1: shadow-mode participant filter (delta error fallback)
+                            const itemsForTransmission = applyDeliveryFilter(allItems.map(item => {
                                 const itemObj = item.toObject();
                                 if (itemObj.encryptedData && Buffer.isBuffer(itemObj.encryptedData)) {
                                     itemObj.encryptedData = itemObj.encryptedData.toString('base64');
                                 }
                                 return itemObj;
-                            });
+                            }), req.body.username, '/feed get delta-fallback');
                             res.json({
                                 success: true,
                                 isDelta: false,
@@ -3887,7 +3977,9 @@ app.post('/feed', validateApiKey, (req, res) => {
                     global.allFeedItems = items;
                     
                     // CRITICAL FIX: Convert encryptedData Buffer to base64 string for transmission
-                    const itemsForTransmission = items.map(item => {
+                    // GROUP-DELIVERY-1: shadow-mode participant filter applied to the mapped
+                    // array below (see the closing `), req.body.username, ...)` of this map).
+                    const itemsForTransmission = applyDeliveryFilter(items.map(item => {
                         const itemObj = item.toObject();
 
                         // Convert encryptedData Buffer to base64 string
@@ -3904,8 +3996,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                         }
 
                         return itemObj;
-                    });
-                    
+                    }), req.body.username, '/feed get full');
+
                     // Build response. If client requested tombstones, query for soft-deleted records
                     // and attach them. Otherwise omit the field entirely (backward compatibility).
                     if (includeTombstones) {
@@ -3983,7 +4075,8 @@ app.post('/feed', validateApiKey, (req, res) => {
                         success: true,
                         isDelta: false,
                         serverTimestamp: new Date().toISOString(),
-                        feedItems: uniqueItems
+                        // GROUP-DELIVERY-1: shadow-mode participant filter (memory fallback)
+                        feedItems: applyDeliveryFilter(uniqueItems, req.body.username, '/feed get memory-fallback')
                     });
                 });
             break;
