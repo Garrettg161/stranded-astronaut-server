@@ -793,7 +793,17 @@ const exactCI = (s) => new RegExp('^' + escapeRegex(s) + '$', 'i');
 // lets the predicate be validated against live traffic at zero risk before it
 // gates delivery. Flip the one flag to enforce.
 // ============================================================================
-const FEED_DELIVERY_ENFORCE = false;   // <-- flip to true to actually filter
+// ENFORCING as of 2026-10-15, after shadow mode validated the predicate on live traffic:
+//   - Helen logged wouldDrop=557 (dm=557 group=120), matching an independently computed
+//     prediction of 557/557/120 exactly.
+//   - The one apparent false positive -- 1.25(3) listed under Hancock -- was investigated and
+//     cleared: 5 of its 17 items were addressed to [Paine, Jefferson] only, carry no 'hancock'
+//     payload key, and do not render on his device. He keeps 12 items and the thread.
+//   - ZERO private items rely on the legacy encryptedData blob alone; all 534 carry
+//     per-recipient keys, which is exactly what the third clause of canDeliver tests. So the
+//     filter cannot drop an item the user holds a key for.
+// Revert = set this back to false and redeploy. No data is mutated by this flag.
+const FEED_DELIVERY_ENFORCE = true;
 
 // A DM or group item is deliverable only to its participants. Public feed items
 // are unaffected. exactCI is anchored ('^...$', case-insensitive), so 'don'
@@ -845,7 +855,15 @@ const applyDeliveryFilter = (items, username, site) => {
                     `wouldDrop=${dropped.length} (dm=${dms} group=${grp}) keep=${kept.length} ` +
                     `enforce=${FEED_DELIVERY_ENFORCE}`);
         if (names.length) {
-            console.log(`DEBUG-DELIVERY-SHADOW: ${site} groups not belonging to '${username}': ${names.join(' | ')}`);
+            // WORDING MATTERS. This is "groups having at least one item NOT ADDRESSED TO this
+            // user", which is NOT the same as "groups this user does not belong to". A member
+            // legitimately appears here when some messages in the group went to a subset that
+            // excluded them -- e.g. Hancock is a member of 1.25(3), but 5 of its 17 items were
+            // addressed to [Paine, Jefferson] only, carry no 'hancock' payload key, and have
+            // never been decryptable by him. Dropping those is correct. The first draft of this
+            // line said "groups not belonging to" and sent the first reader straight to a false
+            // alarm.
+            console.log(`DEBUG-DELIVERY-SHADOW: ${site} groups with items not addressed to '${username}': ${names.join(' | ')}`);
         }
     }
     return FEED_DELIVERY_ENFORCE ? kept : items;
